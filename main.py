@@ -167,8 +167,14 @@ class App(tk.Tk):
             self.limiter = BandwidthLimiter(down, up)
             self.limiter.start()
             time.sleep(0.5)
-            if (self.limiter._in_thread and not self.limiter._in_thread.is_alive()
-                    and self.limiter._out_thread and not self.limiter._out_thread.is_alive()):
+            # Surface errors captured inside the worker threads
+            if self.limiter._thread_errors:
+                err = next(iter(self.limiter._thread_errors.values()))
+                raise OSError(str(err))
+            # Verify both threads are still alive
+            in_ok = self.limiter._in_thread and self.limiter._in_thread.is_alive()
+            out_ok = self.limiter._out_thread and self.limiter._out_thread.is_alive()
+            if not in_ok or not out_ok:
                 raise OSError("WinDivert no pudo iniciar (servicio deshabilitado?)")
         except OSError as e:
             msg = str(e)

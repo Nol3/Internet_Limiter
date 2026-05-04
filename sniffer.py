@@ -33,6 +33,7 @@ class BandwidthLimiter:
         self._dropped_down = 0
         self._dropped_up = 0
         self._stats_lock = threading.Lock()
+        self._thread_errors: dict[str, Exception] = {}
 
     def set_limits(self, rate_down_bps: float, rate_up_bps: float) -> None:
         self.down_enabled = rate_down_bps > 0
@@ -44,7 +45,6 @@ class BandwidthLimiter:
 
     def _loop(self, direction: str) -> None:
         is_in = direction == "in"
-        # Exclude loopback + LAN ranges to only throttle real internet
         filter_str = (
             ("inbound" if is_in else "outbound")
             + " and ip"
@@ -58,6 +58,8 @@ class BandwidthLimiter:
         )
         bucket = self.down_bucket if is_in else self.up_bucket
         enabled_attr = "down_enabled" if is_in else "up_enabled"
+
+        # Open WinDivert handle — errors here are captured and surfaced to caller
         try:
             handle = pydivert.WinDivert(filter_str)
             if is_in:
@@ -65,6 +67,12 @@ class BandwidthLimiter:
             else:
                 self._out_handle = handle
             handle.open()
+        except Exception as e:
+            self._thread_errors[direction] = e
+            return
+
+        # Main packet loop
+        try:
             while self._running:
                 try:
                     packet = handle.recv()
@@ -99,17 +107,20 @@ class BandwidthLimiter:
                         self._bytes_up += size
         finally:
             try:
-                if is_in and self._in_handle:
-                    self._in_handle.close()
-                elif self._out_handle:
-                    self._out_handle.close()
+                handle.close()
             except Exception:
                 pass
+            # Clear own handle reference; never touch the other direction's handle
+            if is_in:
+                self._in_handle = None
+            else:
+                self._out_handle = None
 
     def start(self) -> None:
         if self._running:
             return
         self._running = True
+        self._thread_errors.clear()
         self._in_thread = threading.Thread(target=self._loop, args=("in",), daemon=True)
         self._out_thread = threading.Thread(target=self._loop, args=("out",), daemon=True)
         self._in_thread.start()
@@ -125,8 +136,6 @@ class BandwidthLimiter:
                     h.close()
                 except Exception:
                     pass
-        self._in_handle = None
-        self._out_handle = None
 
     def get_stats(self) -> tuple[int, int]:
         with self._stats_lock:

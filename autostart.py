@@ -2,6 +2,9 @@
 
 Usa schtasks.exe para crear una tarea con 'Run with highest privileges' +
 trigger 'At log on'. Esto lanza el exe como admin sin mostrar UAC.
+
+Nota: autostart solo funciona con el ejecutable compilado (build.bat).
+En modo dev (python main.py) la tarea no se puede registrar correctamente.
 """
 from __future__ import annotations
 import subprocess
@@ -24,11 +27,11 @@ def _run(*args: str) -> tuple[int, str]:
         return -1, str(e)
 
 
-def current_exe_path() -> str:
-    """Devuelve ruta del exe actual (PyInstaller) o del script .py."""
+def current_exe_path() -> str | None:
+    """Devuelve ruta del exe compilado, o None si corre en modo dev."""
     if getattr(sys, "frozen", False):
         return sys.executable
-    return str(Path(__file__).resolve().parent / "main.py")
+    return None
 
 
 def is_enabled() -> bool:
@@ -39,6 +42,11 @@ def is_enabled() -> bool:
 def enable() -> tuple[bool, str]:
     """Crea tarea que arranca el exe al iniciar sesion, con privilegios altos."""
     exe = current_exe_path()
+    if exe is None:
+        return False, (
+            "Autostart solo funciona con el ejecutable compilado.\n"
+            "Ejecuta build.bat para generar dist\\Limitador.exe y luego úsalo."
+        )
     if not Path(exe).exists():
         return False, f"Ruta no existe: {exe}"
     # /RL HIGHEST = run with highest privileges -> sin UAC prompt al login
