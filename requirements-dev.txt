@@ -1,0 +1,4 @@
+# Development-only dependencies (not needed to run Limitador).
+-r requirements.txt
+pytest>=8.0
+pyinstaller>=6.10

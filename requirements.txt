@@ -1,2 +1,9 @@
-pydivert>=2.1.0
-Pillow>=10.0.0
+# Runtime dependencies of Limitador.
+#
+# Pinned on purpose: pydivert changed its public API between 2.x and 4.x, and the version
+# matters a lot here - 4.x bundles WinDivert 2.2.2, which loads correctly with Windows'
+# "Memory Integrity" (HVCI) enabled, while the WinDivert 1.4 driver shipped by older
+# pydivert releases does not.
+pydivert==4.0.0
+pillow>=10.0.0
+pystray>=0.19.5

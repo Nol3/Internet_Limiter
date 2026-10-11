@@ -1,9 +1,11 @@
-; Limitador - Inno Setup Installer Script
-; Requiere Inno Setup 6.x: https://jrsoftware.org/isinfo.php
-; Compila primero con build.bat para generar dist\Limitador.exe
+; ===========================================================================
+;  Limitador - instalador (Inno Setup 6.x)
+;
+;  Compila antes el ejecutable:  build_installer.bat  (que llama a build.bat)
+; ===========================================================================
 
 #define MyAppName      "Limitador"
-#define MyAppVersion   "1.0.0"
+#define MyAppVersion   "2.0.0"
 #define MyAppPublisher "Limitador Project"
 #define MyAppURL       "https://github.com/Nol3/Internet_Limiter"
 #define MyAppExeName   "Limitador.exe"
@@ -31,10 +33,10 @@ PrivilegesRequired=admin
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoVersion={#MyAppVersion}
-VersionInfoDescription=Limitador de ancho de banda PC-wide
+VersionInfoDescription=Limitador de ancho de banda (por aplicacion y por equipo)
 VersionInfoProductName={#MyAppName}
 VersionInfoCopyright=Apache License 2.0
-MinVersion=10.0
+MinVersion=10.0.17763
 CloseApplications=yes
 CloseApplicationsFilter=*{#MyAppExeName}*
 RestartApplications=no
@@ -46,42 +48,55 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-WelcomeLabel1=Bienvenido al asistente de instalaci%ón de [name]
-WelcomeLabel2=Este asistente instalar%á [name/ver] en tu equipo.%n%n[name] limita el ancho de banda de internet a nivel del sistema, sin necesitar configurar nada en el router.%n%nSe recomienda cerrar otras aplicaciones antes de continuar.
-FinishedHeadingLabel=Instalaci%ón de [name] completada
-FinishedLabelNoIcons=[name] se ha instalado correctamente.%n%nHaz doble clic en el icono del escritorio o en el Men%ú Inicio para iniciar el programa.
+WelcomeLabel2=Este asistente instalara [name/ver] en tu equipo.%n%n[name] limita el ancho de banda de internet por aplicacion o para todo el equipo, sin configurar nada en el router.%n%nNecesita permisos de administrador porque usa el driver de captura de paquetes WinDivert (se instala y se mantiene actualizado automaticamente).
+FinishedHeadingLabel=Instalacion de [name] completada
+FinishedLabelNoIcons=[name] se ha instalado correctamente.%n%nHaz doble clic en el icono del escritorio o en el Menu Inicio para iniciar el programa.
 ClickFinish=Haz clic en Finalizar para cerrar el asistente.
 
 [Tasks]
 Name: "desktopicon"; Description: "Crear icono en el Escritorio"; GroupDescription: "Iconos adicionales:"; Flags: checkedonce
-Name: "autostart"; Description: "Iniciar Limitador autom%áticamente con Windows"; GroupDescription: "Opciones de inicio:"; Flags: unchecked
+Name: "autostart"; Description: "Iniciar Limitador automaticamente con Windows (sin aviso de UAC)"; GroupDescription: "Opciones de inicio:"; Flags: unchecked
+
+[Dirs]
+; Carpeta estable del driver: escribible solo por administradores (el instalador corre
+; elevado). La app vuelve a asegurar los permisos con icacls en cada arranque.
+Name: "{commonappdata}\{#MyAppName}"; Permissions: users-read
+Name: "{commonappdata}\{#MyAppName}\driver"; Permissions: users-read
 
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Limitador.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist isreadme
+Source: "CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\Limitador.ico"
+Name: "{group}\Diagnostico de {#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--cli --check"; IconFilename: "{app}\Limitador.ico"
 Name: "{group}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\Limitador.ico"; Tasks: desktopicon
 
 [Run]
-; Registrar tarea de inicio automático en Task Scheduler
-Filename: "{sys}\schtasks.exe"; Parameters: "/Create /TN ""{#MyAppName}"" /TR ""{app}\{#MyAppExeName}"" /SC ONLOGON /RL HIGHEST /F"; Flags: runhidden; Tasks: autostart; StatusMsg: "Configurando inicio automático con Windows..."
-; Ofrecer lanzar la app al finalizar
+; Inicio automatico con privilegios altos (sin prompt de UAC en cada login).
+Filename: "{sys}\schtasks.exe"; Parameters: "/Create /TN ""{#MyAppName}"" /TR """"{app}\{#MyAppExeName}"" --minimized"" /SC ONLOGON /RL HIGHEST /F"; Flags: runhidden; Tasks: autostart; StatusMsg: "Configurando el inicio automatico con Windows..."
+; Abrir la app al terminar.
 Filename: "{app}\{#MyAppExeName}"; Description: "Iniciar {#MyAppName} ahora"; Flags: nowait postinstall skipifsilent shellexec
 
 [UninstallRun]
+; Limpieza: tarea de inicio automatico y registro del driver.
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""{#MyAppName}"" /F"; Flags: runhidden; RunOnceId: "RemoveAutostart"
+Filename: "{sys}\sc.exe"; Parameters: "stop WinDivert"; Flags: runhidden; RunOnceId: "StopDriver"
+Filename: "{sys}\sc.exe"; Parameters: "delete WinDivert"; Flags: runhidden; RunOnceId: "DeleteDriver"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+Type: filesandordirs; Name: "{commonappdata}\{#MyAppName}\driver"
+Type: files; Name: "{userappdata}\{#MyAppName}\config.json"
 
 [Code]
 { ------------------------------------------------------------------ }
-{  Verificaciones previas a la instalación                           }
+{  Comprobaciones previas                                           }
 { ------------------------------------------------------------------ }
 
 function IsWin10OrLater(): Boolean;
@@ -93,8 +108,6 @@ begin
 end;
 
 function InitializeSetup(): Boolean;
-var
-  ErrMsg: String;
 begin
   Result := True;
 
@@ -102,7 +115,7 @@ begin
   begin
     MsgBox(
       'Limitador requiere Windows 10 o superior.' + #13#10 +
-      'Tu versión de Windows no es compatible.',
+      'Tu version de Windows no es compatible.',
       mbError, MB_OK
     );
     Result := False;
@@ -112,9 +125,9 @@ begin
   if not FileExists(ExpandConstant('{src}\dist\{#MyAppExeName}')) then
   begin
     MsgBox(
-      'No se encontró dist\{#MyAppExeName}.' + #13#10 + #13#10 +
-      'Debes compilar el ejecutable antes de crear el instalador.' + #13#10 +
-      'Ejecuta build.bat en el directorio del proyecto.',
+      'No se encontro dist\{#MyAppExeName}.' + #13#10 + #13#10 +
+      'Debes compilar el ejecutable antes de crear el instalador:' + #13#10 +
+      'ejecuta build.bat en el directorio del proyecto.',
       mbError, MB_OK
     );
     Result := False;
@@ -123,21 +136,21 @@ begin
 end;
 
 { ------------------------------------------------------------------ }
-{  Página de bienvenida personalizada con info del sistema           }
+{  Aviso sobre el antivirus (falso positivo conocido)               }
 { ------------------------------------------------------------------ }
 
 procedure InitializeWizard();
 begin
   WizardForm.WelcomeLabel2.Caption :=
     WizardForm.WelcomeLabel2.Caption + #13#10 + #13#10 +
-    'Nota: Limitador usa el driver WinDivert para interceptar ' +
-    'paquetes de red. Algunos antivirus pueden marcarlo como ' +
-    'sospechoso — es un falso positivo. Agrega una exclusión ' +
-    'para Limitador.exe si ocurre.';
+    'Nota: Limitador usa el driver WinDivert para interceptar paquetes de red. ' +
+    'Algunos antivirus lo marcan como sospechoso: es un falso positivo. Si ocurre, ' +
+    'anade una exclusion para Limitador.exe y para ' +
+    ExpandConstant('{commonappdata}\Limitador\driver') + '.';
 end;
 
 { ------------------------------------------------------------------ }
-{  Post-instalación: verificar que el exe se instaló correctamente   }
+{  Post-instalacion: comprobar que todo quedo en su sitio            }
 { ------------------------------------------------------------------ }
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -145,12 +158,10 @@ begin
   if CurStep = ssPostInstall then
   begin
     if not FileExists(ExpandConstant('{app}\{#MyAppExeName}')) then
-    begin
       MsgBox(
-        'Advertencia: no se pudo verificar la instalación del ejecutable.' + #13#10 +
+        'Advertencia: no se pudo verificar la instalacion del ejecutable.' + #13#10 +
         'Si el programa no inicia, intenta reinstalar.',
         mbError, MB_OK
       );
-    end;
   end;
 end;

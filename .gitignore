@@ -6,11 +6,18 @@
 build/
 dist/
 *.spec
-!Limitador.spec.template
+!Limitador.spec
+Limitador.lnk
 
 # --- Inno Setup output ---
 installer_output/
 *.iss.bak
+
+# --- Salidas de las herramientas de verificacion ---
+tools/acceptance_output.txt
+tools/live_output.txt
+tools/frozen_*.txt
+tools/*.json
 
 # --- Python ---
 __pycache__/

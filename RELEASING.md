@@ -1,104 +1,65 @@
-# Crear un nuevo release
+# Publicar una versión
 
-Esta guía es para el dueño del repositorio. El workflow `.github/workflows/release.yml` automatiza el build y publicación de cada release.
+Guía para sacar una release de Limitador.
 
-## Flujo automatizado (recomendado)
+## 1. Preparar el código
 
-### 1. Sube el repo a GitHub (solo la primera vez)
+1. Comprobar que `limitador/rules.py` tiene la versión correcta (`APP_VERSION`), que
+   `installer.iss` (`MyAppVersion`) y el `CHANGELOG.md` coinciden.
+2. Pasar las pruebas y las comprobaciones que no necesitan permisos:
 
-```powershell
-cd "C:\Users\aleja\Desktop\Claude\Internet_Limiter-main"
-git init
-git add .
-git commit -m "chore: initial commit (v1.0.0)"
-git branch -M main
-git remote add origin https://github.com/Nol3/Internet_Limiter.git
-git push -u origin main
+   ```bat
+   .venv\Scripts\python.exe -m pytest tests -q
+   .venv\Scripts\python.exe tools\pacing_check.py
+   ```
+
+3. Prueba de aceptación en red real (pide UAC, descarga unos cientos de MB):
+
+   ```bat
+   powershell -NoProfile -ExecutionPolicy Bypass -File tools\run_elevated.ps1 -Seconds 5
+   ```
+
+   Debe terminar con `RESULTADO: OK`. Si dice `MEDICIÓN NO VÁLIDA`, el espejo dejó de servir
+   datos: repite la prueba más tarde (Cloudflare, por ejemplo, limita por IP si se abusa).
+
+## 2. Compilar
+
+```bat
+build_installer.bat
 ```
 
-### 2. Verifica que `installer.iss` y `CHANGELOG.md` reflejan la versión correcta
+Genera:
 
-- `installer.iss` línea: `#define MyAppVersion "1.0.0"`
-- `CHANGELOG.md`: la sección `[1.0.0]` debe estar al inicio
+- `dist\Limitador.exe` — portable (~20 MB).
+- `installer_output\Setup_Limitador_<versión>.exe` — instalador.
 
-### 3. Crea el tag y haz push
+`build.bat` se niega a empaquetar si alguna prueba falla, y al final ejecuta
+`dist\Limitador.exe --cli --check` para verificar el ejecutable congelado.
 
-```powershell
-git tag -a v1.0.0 -m "Release v1.0.0"
-git push origin v1.0.0
+## 3. Probar el instalador
+
+En una máquina (o usuario) limpia:
+
+1. Instalar y comprobar que pide elevación, crea accesos directos y registra el driver.
+2. `Limitador.exe --cli --check` debe dar todo en verde.
+3. Limitar una descarga real y comprobar la tasa.
+4. Desinstalar: no deben quedar ni la tarea programada `Limitador`, ni el servicio `WinDivert`,
+   ni `%ProgramData%\Limitador\driver`.
+
+## 4. Publicar
+
+```bat
+git tag -a v<versión> -m "Limitador <versión>"
+git push origin main --tags
 ```
 
-GitHub Actions detecta el tag `v*` y dispara el workflow automáticamente:
+Crear la release en GitHub y adjuntar:
 
-1. Configura Python 3.12 + dependencias.
-2. Genera `Limitador.ico` desde `Limiter_icon.png`.
-3. Compila `dist\Limitador.exe` con PyInstaller.
-4. Instala Inno Setup y compila `installer_output\Setup_Limitador_1.0.0.exe`.
-5. Calcula checksums SHA-256.
-6. Crea el GitHub Release y sube los 3 archivos.
+- `installer_output\Setup_Limitador_<versión>.exe` (recomendado para usuarios finales)
+- `dist\Limitador.exe` (portable)
 
-### 4. Verifica el release publicado
+En las notas de la release, resumir el `CHANGELOG.md` y recordar:
 
-Revisa <https://github.com/Nol3/Internet_Limiter/releases/latest>. Debes ver:
-
-- `Limitador.exe`
-- `Setup_Limitador_1.0.0.exe`
-- `checksums.txt`
-
----
-
-## Disparar el workflow manualmente
-
-Si no quieres tag, puedes ejecutarlo manual:
-
-1. Ve a la pestaña **Actions** del repo.
-2. Selecciona "Build & Release" en la lista.
-3. Click "Run workflow".
-4. Introduce el tag (ej: `v1.0.0`).
-5. Click "Run workflow".
-
----
-
-## Crear un release manualmente (sin GitHub Actions)
-
-```powershell
-.\build_installer.bat
-```
-
-Sube `dist\Limitador.exe` y `installer_output\Setup_Limitador_1.0.0.exe` manualmente desde la UI de GitHub Releases.
-
----
-
-## Bumping de versión para futuros releases
-
-Cuando subas a v1.1.0, v2.0.0, etc.:
-
-1. Edita `installer.iss`: `#define MyAppVersion "1.1.0"`
-2. Añade una nueva sección al inicio de `CHANGELOG.md` con la fecha.
-3. Actualiza el path hardcodeado en `.github/workflows/release.yml`:
-   - `Setup_Limitador_1.0.0.exe` → `Setup_Limitador_1.1.0.exe` (3 ocurrencias).
-4. Commit + tag + push:
-
-```powershell
-git add .
-git commit -m "chore: bump to v1.1.0"
-git tag -a v1.1.0 -m "Release v1.1.0"
-git push origin main
-git push origin v1.1.0
-```
-
----
-
-## Troubleshooting CI
-
-### El workflow falla en "Build installer"
-
-Inno Setup falló. Mira el log; suele ser un path roto en `installer.iss` (algún `Source: "..."` que no existe).
-
-### El release se crea pero los archivos no se suben
-
-Verifica que `permissions: contents: write` está en `release.yml` (ya lo está).
-
-### `pydivert` no se empaqueta correctamente
-
-PyInstaller debe usar `--collect-all pydivert` para incluir `WinDivert.dll` y `WinDivert.sys`. Ya está en el workflow.
+- Se necesitan permisos de administrador (driver de kernel).
+- Algunos antivirus marcan WinDivert como sospechoso: es un falso positivo.
+- Cómo recuperar la conexión si algo va mal (`tools\unblock.cmd`, ver README).
