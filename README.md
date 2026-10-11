@@ -82,6 +82,15 @@ En la página de [Releases](../../releases/latest) hay dos opciones:
 No hace falta Python ni nada extra: el driver WinDivert viaja dentro del ejecutable y se
 instala en `%ProgramData%\Limitador\driver` la primera vez.
 
+> **Si Windows muestra «Windows protegió tu PC» (SmartScreen)**: el programa no está firmado
+> digitalmente (un certificado de firma de código cuesta dinero). Pulsa **Más información →
+> Ejecutar de todas formas**. Es el mismo aviso que dan todas las aplicaciones libres sin
+> firmar; el código está completo en este repositorio y el driver es WinDivert, el mismo que
+> usan Wireshark o GlassWire.
+>
+> Algunos antivirus marcan el ejecutable o el driver (falso positivo típico con WinDivert):
+> añade una exclusión para `Limitador.exe` y `%ProgramData%\Limitador\driver`.
+
 ---
 
 ## Uso

@@ -14,6 +14,10 @@ datos inventados ni capturas retocadas (las capturas de la interfaz se generan c
 - Conexión a internet: la demostración descarga unos 150 MB de un servidor público de pruebas.
 - Nada más. No hace falta Python, ni el driver aparte, ni configurar nada.
 
+> En un equipo nuevo, Windows puede mostrar el aviso de **SmartScreen** («Windows protegió tu
+> PC») porque el programa no está firmado digitalmente: *Más información → Ejecutar de todas
+> formas*. Y el antivirus puede marcar el driver WinDivert como falso positivo.
+
 ---
 
 ## Guion
