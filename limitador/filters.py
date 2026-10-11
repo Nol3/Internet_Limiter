@@ -11,6 +11,7 @@ against ``WinDivertHelperCompileFilter`` on this machine:
 Because of the first rule, "exclude these ranges" is written with De Morgan applied
 by hand: ``NOT (lo <= x <= hi)`` becomes ``(not x >= lo or not x <= hi)``.
 """
+
 from __future__ import annotations
 
 from pydivert import WinDivert
@@ -21,12 +22,12 @@ from pydivert.consts import Layer
 #: (The local side of every packet is a private address, so filtering it would
 #: discard 100% of internet traffic - that was the v1 bug.)
 DEFAULT_EXCLUDED_BLOCKS: tuple[tuple[str, str], ...] = (
-    ("127.0.0.0", "127.255.255.255"),        # loopback
-    ("10.0.0.0", "10.255.255.255"),          # RFC1918
-    ("172.16.0.0", "172.31.255.255"),        # RFC1918
-    ("192.168.0.0", "192.168.255.255"),      # RFC1918
-    ("169.254.0.0", "169.254.255.255"),      # link-local (APIPA)
-    ("224.0.0.0", "239.255.255.255"),        # multicast (mDNS/SSDP/UPnP)
+    ("127.0.0.0", "127.255.255.255"),  # loopback
+    ("10.0.0.0", "10.255.255.255"),  # RFC1918
+    ("172.16.0.0", "172.31.255.255"),  # RFC1918
+    ("192.168.0.0", "192.168.255.255"),  # RFC1918
+    ("169.254.0.0", "169.254.255.255"),  # link-local (APIPA)
+    ("224.0.0.0", "239.255.255.255"),  # multicast (mDNS/SSDP/UPnP)
     ("255.255.255.255", "255.255.255.255"),  # limited broadcast (DHCP renew)
 )
 
@@ -85,4 +86,7 @@ def validate_filter(filter_string: str, layer: Layer = Layer.NETWORK) -> tuple[b
         return False, f"no se pudo validar el filtro: {exc}"
     if ok:
         return True, "ok"
-    return False, f"{msg or 'filtro inválido'} (offset {pos}) en: {filter_string[max(0, pos - 20):pos + 20]!r}"
+    return (
+        False,
+        f"{msg or 'filtro inválido'} (offset {pos}) en: {filter_string[max(0, pos - 20) : pos + 20]!r}",
+    )

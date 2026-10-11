@@ -1,6 +1,7 @@
 """Convierte Limiter_icon.png -> Limitador.ico con recorte cuadrado automatico."""
+
 from __future__ import annotations
-import os
+
 import sys
 from pathlib import Path
 
@@ -20,15 +21,15 @@ def resize_to_square_with_padding(img: Image.Image, size: int = 256) -> Image.Im
     """Redimensiona la imagen a un cuadrado agregando padding transparente."""
     # Redimensionar manteniendo la proporcion
     img.thumbnail((size, size), Image.Resampling.LANCZOS)
-    
+
     # Crear un lienzo cuadrado con fondo transparente
     square_img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    
+
     # Pegar la imagen redimensionada en el centro
     x_offset = (size - img.width) // 2
     y_offset = (size - img.height) // 2
     square_img.paste(img, (x_offset, y_offset))
-    
+
     return square_img
 
 

@@ -8,6 +8,7 @@ v1 refused to work unless the app was frozen; here the launch command is built f
 either the compiled ``.exe`` or ``pythonw.exe + main.py``, so autostart also works while
 developing.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -21,7 +22,9 @@ CREATE_NO_WINDOW = 0x08000000
 def _run(*args: str) -> tuple[int, str]:
     try:
         result = subprocess.run(
-            ["schtasks.exe", *args], capture_output=True, text=True,
+            ["schtasks.exe", *args],
+            capture_output=True,
+            text=True,
             creationflags=CREATE_NO_WINDOW,
         )
         return result.returncode, (result.stdout or "") + (result.stderr or "")
@@ -71,8 +74,16 @@ def enable() -> tuple[bool, str]:
         return False, f"no existe el programa a registrar: {program}"
     command = f'"{program}"' + (f" {arguments}" if arguments else "")
     rc, out = _run(
-        "/Create", "/TN", TASK_NAME, "/TR", command,
-        "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
+        "/Create",
+        "/TN",
+        TASK_NAME,
+        "/TR",
+        command,
+        "/SC",
+        "ONLOGON",
+        "/RL",
+        "HIGHEST",
+        "/F",
     )
     if rc == 0:
         return True, f"tarea '{TASK_NAME}' creada: {command}"

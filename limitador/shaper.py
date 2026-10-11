@@ -10,7 +10,7 @@ packet on an idle link would blackhole the connection, which is worse than being
 
 **AQM (drops the excess).** Dropping happens only when the caller says there is already a
 queue waiting: if ``queued_bytes + size`` exceeds the delay budget
-(``max(rate × max_delay, 2 MTU)``) the packet is dropped. TCP then backs off instead of
+(``max(rate x max_delay, 2 MTU)``) the packet is dropped. TCP then backs off instead of
 queueing forever, so the added latency stays bounded by ``max_delay``. This is the
 bufferbloat control, and it can never trigger on an idle shaper because the caller passes
 ``queued_bytes == 0`` then.
@@ -18,11 +18,13 @@ bufferbloat control, and it can never trigger on an idle shaper because the call
 Everything is injectable (``clock``) so the behaviour is testable with no network, no
 driver and no admin rights.
 """
+
 from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Protocol
+from collections.abc import Callable
+from typing import Protocol
 
 MB = 1024 * 1024
 
@@ -63,13 +65,26 @@ class Shaper:
     rate_bps:
         Allowed bytes per second (must be > 0).
     max_delay_ms:
-        Delay budget. Sets the AQM threshold: ``rate × max_delay`` bytes may be queued
+        Delay budget. Sets the AQM threshold: ``rate x max_delay`` bytes may be queued
         before packets start being dropped.
     """
 
-    __slots__ = ("_rate", "max_delay", "_burst", "_next_departure", "_lock", "_clock",
-                 "_skip_sleep", "sent_bytes", "dropped_bytes", "sent_packets",
-                 "dropped_packets", "delayed_packets", "max_observed_delay", "aqm_drops")
+    __slots__ = (
+        "_burst",
+        "_clock",
+        "_lock",
+        "_next_departure",
+        "_rate",
+        "_skip_sleep",
+        "aqm_drops",
+        "delayed_packets",
+        "dropped_bytes",
+        "dropped_packets",
+        "max_delay",
+        "max_observed_delay",
+        "sent_bytes",
+        "sent_packets",
+    )
 
     def __init__(
         self,
@@ -141,8 +156,7 @@ class Shaper:
                 return False, 0.0
             now = self._clock.monotonic()
             depart = self._next_departure
-            if depart < now:
-                depart = now
+            depart = max(depart, now)
             self._next_departure = depart + (size / self._rate)
             return True, depart - now
 
@@ -171,8 +185,7 @@ class Shaper:
         self.sent_packets += 1
         if delay > 0:
             self.delayed_packets += 1
-            if delay > self.max_observed_delay:
-                self.max_observed_delay = delay
+            self.max_observed_delay = max(self.max_observed_delay, delay)
 
     def note_dropped(self, size: int) -> None:
         self.dropped_bytes += size

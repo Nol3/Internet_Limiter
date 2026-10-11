@@ -30,20 +30,22 @@ no internet at all. Therefore:
   the handles) always restores the connection immediately;
 * a self-test of the packet parser runs *before* the first handle is opened.
 """
+
 from __future__ import annotations
 
+import contextlib
+import ctypes
 import logging
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from pydivert import WinDivert
 from pydivert.consts import Layer
 
-from . import driver
-from . import classify
+from . import classify, driver
 from .classify import inspect_safe, should_pass_through
 from .filters import build_network_filter, build_socket_filter, validate_filter
 from .procmap import ProcessMap
@@ -56,6 +58,12 @@ MB = 1024 * 1024
 MIN_QUEUE_BYTES = 2 * MB
 MAX_QUEUE_BYTES = 16 * MB
 MAX_CONSECUTIVE_RECV_ERRORS = 20
+#: ERROR_ACCESS_DENIED de la API de Windows.
+ERROR_ACCESS_DENIED = 5
+#: Cuánto se cachea la regla de un PID antes de volver a resolverla.
+RULE_CACHE_TTL_SECONDS = 5.0
+#: Tope de entradas del caché de reglas por PID (válvula de seguridad).
+MAX_CACHED_PIDS = 4096
 
 
 class LimiterError(RuntimeError):
@@ -128,7 +136,7 @@ class _ByteQueue:
 
 @dataclass
 class EngineEvent:
-    level: str          # "info" | "warning" | "error"
+    level: str  # "info" | "warning" | "error"
     message: str
 
 
@@ -191,7 +199,7 @@ class Engine:
         self._queues: dict[str, _ByteQueue] = {}
         self._global_shapers: dict[str, Shaper] = {}
         self._app_shapers: dict[tuple[str, str], Shaper] = {}
-        self._shape_lock = threading.RLock()   # reentrant: _sync_shapers -> _shaper_for
+        self._shape_lock = threading.RLock()  # reentrant: _sync_shapers -> _shaper_for
         self._pid_rule_cache: dict[int, tuple[float, AppRule | None]] = {}
         self._rule_env: tuple[str, str] = ("", "")
         self._bytes = {"in": 0, "out": 0}
@@ -249,20 +257,25 @@ class Engine:
             self._started_at = time.monotonic()
             for direction in ("in", "out"):
                 injector = threading.Thread(
-                    target=self._inject_loop, args=(direction,),
-                    name=f"limitador-inject-{direction}", daemon=True,
+                    target=self._inject_loop,
+                    args=(direction,),
+                    name=f"limitador-inject-{direction}",
+                    daemon=True,
                 )
                 self._inject_threads[direction] = injector
                 injector.start()
             for direction in ("in", "out"):
                 capture = threading.Thread(
-                    target=self._capture_loop, args=(direction,),
-                    name=f"limitador-capture-{direction}", daemon=True,
+                    target=self._capture_loop,
+                    args=(direction,),
+                    name=f"limitador-capture-{direction}",
+                    daemon=True,
                 )
                 self._capture_threads[direction] = capture
                 capture.start()
             self._supervisor = threading.Thread(
-                target=self._supervisor_loop, name="limitador-watchdog", daemon=True)
+                target=self._supervisor_loop, name="limitador-watchdog", daemon=True
+            )
             self._supervisor.start()
             self._emit("info", "Limitador iniciado")
         except Exception:
@@ -282,11 +295,11 @@ class Engine:
             if not self._released:
                 self._emit("info", "Deteniendo Limitador…")
             self._running = False
-            for queue in self._queues.values():      # wake the injectors so they flush
+            for queue in self._queues.values():  # wake the injectors so they flush
                 queue.close()
             for thread in self._inject_threads.values():
                 thread.join(timeout=2.0)
-            self._close_handles()                    # unblocks recv() in the capture threads
+            self._close_handles()  # unblocks recv() in the capture threads
             for thread in self._capture_threads.values():
                 thread.join(timeout=2.0)
             self._cleanup(silent=False)
@@ -317,10 +330,8 @@ class Engine:
         if self._socket_thread is not None:
             self._socket_thread.join(timeout=1.0)
             self._socket_thread = None
-        try:
+        with contextlib.suppress(Exception):  # pragma: no cover
             self.procmap.stop()
-        except Exception:  # pragma: no cover
-            pass
         with self._shape_lock:
             self._global_shapers.clear()
             self._app_shapers.clear()
@@ -338,23 +349,15 @@ class Engine:
         """
         if self._timer_raised:
             return
-        try:
-            import ctypes
-
+        with contextlib.suppress(Exception):  # pragma: no cover - sin winmm
             ctypes.windll.winmm.timeBeginPeriod(1)
             self._timer_raised = True
-        except Exception:  # pragma: no cover - non-Windows or winmm missing
-            pass
 
     def _restore_timer_resolution(self) -> None:
         if not self._timer_raised:
             return
-        try:
-            import ctypes
-
+        with contextlib.suppress(Exception):  # pragma: no cover
             ctypes.windll.winmm.timeEndPeriod(1)
-        except Exception:  # pragma: no cover
-            pass
         self._timer_raised = False
 
     def pause(self) -> None:
@@ -387,7 +390,7 @@ class Engine:
     def _open_handles(self) -> None:
         settings = self.config.settings
         try:
-            for direction, real in (("out", "outbound"), ("in", "inbound")):
+            for _direction, real in (("out", "outbound"), ("in", "inbound")):
                 filt = build_network_filter(real, exclude_lan=settings.exclude_lan)
                 handle = self._handle_factory(filt, Layer.NETWORK)
                 handle.open()
@@ -395,7 +398,7 @@ class Engine:
         except OSError as exc:
             self._close_handles()
             winerror = getattr(exc, "winerror", None)
-            if winerror == 5:
+            if winerror == ERROR_ACCESS_DENIED:
                 raise LimiterError(
                     "Windows rechazó el acceso al driver (error 5). Ábrelo como administrador."
                 ) from exc
@@ -409,10 +412,8 @@ class Engine:
     def _close_handles(self) -> None:
         while self._handles:
             handle = self._handles.pop()
-            try:
+            with contextlib.suppress(Exception):
                 handle.close()
-            except Exception:
-                pass
 
     # -------------------------------------------------------------------- shaping
     def _rate_for(self, direction: str, rule: AppRule | None) -> float:
@@ -444,8 +445,10 @@ class Engine:
         settings = self.config.settings
         with self._shape_lock:
             if settings.has_global_limit and not self._global_shapers:
-                for direction, rate in (("in", settings.global_down_bps),
-                                        ("out", settings.global_up_bps)):
+                for direction, rate in (
+                    ("in", settings.global_down_bps),
+                    ("out", settings.global_up_bps),
+                ):
                     if rate > 0:
                         self._global_shapers[direction] = Shaper(rate, settings.max_delay_ms)
             for direction in ("in", "out"):
@@ -492,9 +495,9 @@ class Engine:
     # ------------------------------------------------------------------ rule lookup
     def _rule_signature(self) -> tuple[str, str]:
         return (
-            "|".join(sorted(
-                f"{r.exe}:{r.down_bps}:{r.up_bps}:{r.enabled}" for r in self.config.rules
-            )),
+            "|".join(
+                sorted(f"{r.exe}:{r.down_bps}:{r.up_bps}:{r.enabled}" for r in self.config.rules)
+            ),
             f"{self.config.settings.global_down_bps}:{self.config.settings.global_up_bps}",
         )
 
@@ -505,13 +508,13 @@ class Engine:
             self._rule_env = signature
             self._pid_rule_cache.clear()
         cached = self._pid_rule_cache.get(pid)
-        if cached and now - cached[0] < 5.0:
+        if cached and now - cached[0] < RULE_CACHE_TTL_SECONDS:
             return cached[1]
         rule = self.config.rule_for_exe(self.procmap.path_for(pid))
         if rule is not None and not rule.has_limit:
             rule = None
         self._pid_rule_cache[pid] = (now, rule)
-        if len(self._pid_rule_cache) > 4096:  # safety valve
+        if len(self._pid_rule_cache) > MAX_CACHED_PIDS:
             self._pid_rule_cache.clear()
         return rule
 
@@ -541,7 +544,7 @@ class Engine:
             # Every exit path below must end in a reinjection or a deliberate drop.
             try:
                 self._process_packet(direction, outbound, handle, packet)
-            except Exception as exc:  # noqa: BLE001 - the packet must never be trapped
+            except Exception as exc:
                 self._note_error(f"error procesando un paquete en {direction}: {exc!r}")
                 self._send(handle, packet)
 
@@ -624,7 +627,7 @@ class Engine:
                     shaper.wait(wait)
                 self._send(handle, packet)
                 shaper.note_sent(size, wait)
-            except Exception as exc:  # noqa: BLE001 - always release the packet
+            except Exception as exc:
                 self._note_error(f"error inyectando en {direction}: {exc!r}")
                 self._send(handle, packet)
 
@@ -655,10 +658,16 @@ class Engine:
             time.sleep(0.5)
             if not self._running:
                 break
-            dead = [f"captura {name}" for name, thread in self._capture_threads.items()
-                    if not thread.is_alive()]
-            dead += [f"inyección {name}" for name, thread in self._inject_threads.items()
-                     if not thread.is_alive()]
+            dead = [
+                f"captura {name}"
+                for name, thread in self._capture_threads.items()
+                if not thread.is_alive()
+            ]
+            dead += [
+                f"inyección {name}"
+                for name, thread in self._inject_threads.items()
+                if not thread.is_alive()
+            ]
             if dead:
                 self.emergency_release("se han detenido hilos del motor (" + ", ".join(dead) + ")")
                 break
@@ -673,8 +682,11 @@ class Engine:
             handle = self._handle_factory(build_socket_filter(), Layer.SOCKET)
             handle.open()
         except Exception as exc:
-            self._emit("warning", f"Capa de sockets no disponible ({exc}); "
-                                 "se usa la tabla de conexiones para atribuir el tráfico")
+            self._emit(
+                "warning",
+                f"Capa de sockets no disponible ({exc}); "
+                "se usa la tabla de conexiones para atribuir el tráfico",
+            )
             return
         self._handles.append(handle)
         self._socket_events_ok = True
@@ -701,13 +713,15 @@ class Engine:
 
     # -------------------------------------------------------------------- reporting
     def _emit(self, level: str, message: str) -> None:
-        log.log({"info": logging.INFO, "warning": logging.WARNING,
-                 "error": logging.ERROR}.get(level, logging.INFO), message)
+        log.log(
+            {"info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}.get(
+                level, logging.INFO
+            ),
+            message,
+        )
         if self.on_event:
-            try:
+            with contextlib.suppress(Exception):  # pragma: no cover
                 self.on_event(EngineEvent(level, message))
-            except Exception:  # pragma: no cover
-                pass
 
     def _note_error(self, message: str) -> None:
         self._errors.append(message)
@@ -720,10 +734,12 @@ class Engine:
                 (f"app:{key}:{direction}" if key else f"global:{direction}"): shaper.snapshot()
                 for (key, direction), shaper in self._app_shapers.items()
             }
-            shapers.update({
-                f"global:{direction}": shaper.snapshot()
-                for direction, shaper in self._global_shapers.items()
-            })
+            shapers.update(
+                {
+                    f"global:{direction}": shaper.snapshot()
+                    for direction, shaper in self._global_shapers.items()
+                }
+            )
         return Snapshot(
             running=self._running,
             paused=self._paused,

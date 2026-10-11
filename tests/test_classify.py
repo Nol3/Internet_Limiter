@@ -1,4 +1,5 @@
 """Packet classification tests: parsing, control-traffic detection, pass-through."""
+
 from __future__ import annotations
 
 import ipaddress
@@ -6,7 +7,13 @@ import struct
 
 import pytest
 
-from limitador.classify import inspect, inspect_safe, is_local_remote, self_test, should_pass_through
+from limitador.classify import (
+    inspect,
+    inspect_safe,
+    is_local_remote,
+    self_test,
+    should_pass_through,
+)
 
 TCP_NO_PAYLOAD = 0x10
 
@@ -14,17 +21,37 @@ TCP_NO_PAYLOAD = 0x10
 def ipv4(src: str, dst: str, proto: int, body: bytes, frag_offset: int = 0) -> bytes:
     total = 20 + len(body)
     flags_offset = frag_offset & 0x1FFF
-    return struct.pack(
-        "!BBHHHBBH4s4s", 0x45, 0, total, 0, flags_offset, 64, proto, 0,
-        ipaddress.IPv4Address(src).packed, ipaddress.IPv4Address(dst).packed,
-    ) + body
+    return (
+        struct.pack(
+            "!BBHHHBBH4s4s",
+            0x45,
+            0,
+            total,
+            0,
+            flags_offset,
+            64,
+            proto,
+            0,
+            ipaddress.IPv4Address(src).packed,
+            ipaddress.IPv4Address(dst).packed,
+        )
+        + body
+    )
 
 
 def ipv6(src: str, dst: str, proto: int, body: bytes) -> bytes:
-    return struct.pack(
-        "!IHBB16s16s", 6 << 28, len(body), proto, 64,
-        ipaddress.IPv6Address(src).packed, ipaddress.IPv6Address(dst).packed,
-    ) + body
+    return (
+        struct.pack(
+            "!IHBB16s16s",
+            6 << 28,
+            len(body),
+            proto,
+            64,
+            ipaddress.IPv6Address(src).packed,
+            ipaddress.IPv6Address(dst).packed,
+        )
+        + body
+    )
 
 
 def tcp(sport: int, dport: int, payload: int = 0, flags: int = 0x02) -> bytes:
@@ -52,8 +79,9 @@ def test_parses_ipv4_tcp_inbound_swaps_ports():
 
 
 def test_parses_ipv6_udp():
-    info = inspect(ipv6("2001:4860:4860::8888", "fe80::1", 17, udp(53, 40000, payload=20)),
-                   outbound=False)
+    info = inspect(
+        ipv6("2001:4860:4860::8888", "fe80::1", 17, udp(53, 40000, payload=20)), outbound=False
+    )
     assert info is not None
     assert info.version == 6 and info.proto == 17
     assert (info.local_port, info.remote_port) == (40000, 53)
@@ -61,7 +89,7 @@ def test_parses_ipv6_udp():
 
 
 def test_parses_ipv6_with_extension_header():
-    body = bytes([6, 0, 0, 0, 0, 0, 0, 0]) + tcp(51000, 443, payload=50)  # hop-by-hop then TCP
+    body = bytes([6, 0, 0, 0, 0, 0, 0, 0]) + tcp(51000, 443, payload=50)  # hop-by-hop + TCP
     info = inspect(ipv6("2001:4860:4860::8888", "fe80::1", 0, body), outbound=True)
     assert info is not None
     assert (info.proto, info.local_port, info.remote_port) == (6, 51000, 443)
@@ -69,7 +97,9 @@ def test_parses_ipv6_with_extension_header():
 
 
 def test_fragment_without_transport_header_is_not_attributable():
-    info = inspect(ipv4("192.168.1.10", "8.8.8.8", 6, tcp(51000, 443), frag_offset=185), outbound=True)
+    info = inspect(
+        ipv4("192.168.1.10", "8.8.8.8", 6, tcp(51000, 443), frag_offset=185), outbound=True
+    )
     assert info is not None
     assert info.local_port == -1
     assert should_pass_through(info, exempt_control=True, limit_ipv6=True) is True
@@ -111,8 +141,10 @@ def test_engine_self_test_passes():
 
 @pytest.mark.parametrize("payload,expected", [(0, True), (1, False), (1400, False)])
 def test_pure_ack_detection(payload, expected):
-    info = inspect(ipv4("192.168.1.10", "8.8.8.8", 6, tcp(51000, 443, payload, flags=TCP_NO_PAYLOAD)),
-                   outbound=True)
+    info = inspect(
+        ipv4("192.168.1.10", "8.8.8.8", 6, tcp(51000, 443, payload, flags=TCP_NO_PAYLOAD)),
+        outbound=True,
+    )
     assert info.is_pure_ack is expected
     assert info.is_control is expected
 
@@ -120,45 +152,55 @@ def test_pure_ack_detection(payload, expected):
 def test_dns_and_icmp_count_as_control():
     dns = inspect(ipv4("192.168.1.10", "8.8.8.8", 17, udp(51000, 53, payload=30)), outbound=True)
     assert dns.is_control is True
-    icmp = inspect(ipv4("192.168.1.10", "8.8.8.8", 1, b"\x08\x00\x00\x00" + b"\x00" * 28), outbound=True)
+    icmp = inspect(
+        ipv4("192.168.1.10", "8.8.8.8", 1, b"\x08\x00\x00\x00" + b"\x00" * 28), outbound=True
+    )
     assert icmp.is_control is True and icmp.local_port == -1
 
 
 def test_control_exemption_can_be_turned_off():
-    info = inspect(ipv4("192.168.1.10", "8.8.8.8", 6, tcp(51000, 443, 0, TCP_NO_PAYLOAD)), outbound=True)
+    info = inspect(
+        ipv4("192.168.1.10", "8.8.8.8", 6, tcp(51000, 443, 0, TCP_NO_PAYLOAD)), outbound=True
+    )
     assert should_pass_through(info, exempt_control=True, limit_ipv6=True) is True
     assert should_pass_through(info, exempt_control=False, limit_ipv6=True) is False
 
 
-@pytest.mark.parametrize("addr,expected", [
-    ("8.8.8.8", False),
-    ("1.1.1.1", False),
-    ("192.168.1.5", True),
-    ("10.0.0.1", True),
-    ("172.20.0.1", True),
-    ("172.40.0.1", False),
-    ("169.254.1.1", True),
-    ("239.255.255.250", True),
-    ("255.255.255.255", True),
-    ("::1", True),
-    ("fe80::1", True),
-    ("fd00::1", True),
-    ("ff02::1", True),
-    ("2001:4860:4860::8888", False),
-])
+@pytest.mark.parametrize(
+    "addr,expected",
+    [
+        ("8.8.8.8", False),
+        ("1.1.1.1", False),
+        ("192.168.1.5", True),
+        ("10.0.0.1", True),
+        ("172.20.0.1", True),
+        ("172.40.0.1", False),
+        ("169.254.1.1", True),
+        ("239.255.255.250", True),
+        ("255.255.255.255", True),
+        ("::1", True),
+        ("fe80::1", True),
+        ("fd00::1", True),
+        ("ff02::1", True),
+        ("2001:4860:4860::8888", False),
+    ],
+)
 def test_local_remote_detection(addr, expected):
     assert is_local_remote(addr) is expected
 
 
 def test_local_traffic_is_never_queued():
-    lan = inspect(ipv4("192.168.1.10", "192.168.1.20", 6, tcp(51000, 445, payload=500)), outbound=True)
+    lan = inspect(
+        ipv4("192.168.1.10", "192.168.1.20", 6, tcp(51000, 445, payload=500)), outbound=True
+    )
     assert lan.is_local_remote is True
     assert should_pass_through(lan, exempt_control=True, limit_ipv6=True) is True
 
 
 def test_ipv6_can_be_excluded_from_limiting():
     # Local side is link-local (fe80::), remote side is a public address.
-    info = inspect(ipv6("fe80::1", "2001:4860:4860::8888", 6, tcp(51000, 443, payload=100)),
-                   outbound=True)
+    info = inspect(
+        ipv6("fe80::1", "2001:4860:4860::8888", 6, tcp(51000, 443, payload=100)), outbound=True
+    )
     assert should_pass_through(info, exempt_control=True, limit_ipv6=False) is True
     assert should_pass_through(info, exempt_control=True, limit_ipv6=True) is False

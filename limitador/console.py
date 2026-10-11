@@ -6,9 +6,12 @@ prints progress to a console has to make its own output safe: this switches the 
 streams to UTF-8 and, more importantly, tells them to replace anything unencodable instead
 of raising.
 """
+
 from __future__ import annotations
 
+import ctypes
 import sys
+from contextlib import suppress
 
 
 def ensure_utf8_console() -> None:
@@ -18,13 +21,8 @@ def ensure_utf8_console() -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:  # pragma: no cover - already replaced/wrapped
             continue
-        try:
+        with suppress(ValueError, OSError):  # pragma: no cover - consola desacoplada
             reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, OSError):  # pragma: no cover - detached console
-            pass
-    try:  # best effort on the console code page too
-        import ctypes
-
+    # Esfuerzo extra: la página de códigos de la consola.
+    with suppress(Exception):  # pragma: no cover - sin consola
         ctypes.windll.kernel32.SetConsoleOutputCP(65001)
-    except Exception:  # pragma: no cover - not a console
-        pass

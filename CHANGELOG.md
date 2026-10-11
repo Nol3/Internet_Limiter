@@ -58,6 +58,16 @@ Esta versión se ha verificado contra la red real.
   paquetes retenidos».
 - **Prueba de aceptación** en red real (`tools\acceptance_test.py`), comprobación de precisión
   (`tools\pacing_check.py`) y vigilante que mata la prueba si se pasa de tiempo.
+- **Demostración guiada** (`tools\demo.cmd`): tres mediciones reales (referencia sin límite,
+  límite global y límite por aplicación) con tabla comparativa y veredicto. Guion en
+  [DEMO.md](DEMO.md).
+- **Capturas de la interfaz desde la propia aplicación** (`Limitador.exe --screenshot CARPETA
+  [--demo]`): recorre las pestañas, guarda una imagen de cada una y sale. Sirve además como
+  verificación de que la interfaz se construye entera en el ejecutable empaquetado. Las
+  imágenes del README se generan así.
+- **Integración continua** (`.github/workflows/ci.yml`): análisis estático, las 102 pruebas y
+  la compilación del ejecutable y del instalador en cada push.
+- **Análisis estático con ruff** (`pyproject.toml`) en cero avisos, y formateo con `ruff format`.
 
 ### Cambiado
 
@@ -67,7 +77,9 @@ Esta versión se ha verificado contra la red real.
 - Empaquetado por `Limitador.spec` (reproducible) en lugar de una línea de `pyinstaller`.
 - Dependencias fijadas (`pydivert==4.0.0`, que trae WinDivert 2.2.2, compatible con la
   «Integridad de memoria» de Windows 11).
-- El instalador limpia la tarea programada, el driver y la carpeta de datos al desinstalar.
+- El instalador limpia la tarea programada, el registro del driver y la carpeta del driver al
+  desinstalar. Los ajustes del usuario (`%APPDATA%\Limitador\config.json`) se conservan a
+  propósito.
 
 ### Eliminado
 

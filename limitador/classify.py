@@ -10,6 +10,7 @@ It answers the three questions the engine asks per packet:
 2. Which local port does it belong to (so the process can be identified)?
 3. Is it control traffic that must never be shaped?
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -23,19 +24,36 @@ PROTO_TCP = 6
 PROTO_UDP = 17
 PROTO_ICMPV6 = 58
 
-#: IPv6 extension headers we know how to skip (+ their size rules).
-_EXT_HEADERS = {0, 43, 44, 51, 60, 59}
-
 DNS_PORT = 53
+
+# Tamaños y desplazamientos de las cabeceras que leemos (RFC 791 y RFC 8200).
+VERSION_4 = 4
+VERSION_6 = 6
+IPV4_MIN_HEADER = 20
+IPV6_HEADER = 40
+TCP_MIN_HEADER = 20
+UDP_HEADER = 8
+UDP_LENGTH_FIELD = 4
+IPV4_PROTO_FIELD = 9
+IPV6_NEXT_HEADER_FIELD = 6
+
+# Cabeceras de extensión de IPv6 (RFC 8200/4302) y cuántas saltamos como máximo.
+EXT_HOP_BY_HOP = 0
+EXT_ROUTING = 43
+EXT_FRAGMENT = 44
+EXT_AH = 51
+EXT_DSTOPTS = 60
+EXT_NO_NEXT = 59
+EXT_FRAGMENT_LEN = 8
+MAX_EXT_HEADERS = 8
+EXT_HEADERS = frozenset({EXT_HOP_BY_HOP, EXT_ROUTING, EXT_FRAGMENT, EXT_AH, EXT_DSTOPTS})
 
 
 def _build_excluded_v4() -> tuple[ipaddress.IPv4Network, ...]:
     nets: list[ipaddress.IPv4Network] = []
     for lo, hi in DEFAULT_EXCLUDED_BLOCKS:
         nets.extend(
-            ipaddress.summarize_address_range(
-                ipaddress.IPv4Address(lo), ipaddress.IPv4Address(hi)
-            )
+            ipaddress.summarize_address_range(ipaddress.IPv4Address(lo), ipaddress.IPv4Address(hi))
         )
     return tuple(nets)
 
@@ -57,7 +75,7 @@ def is_local_remote(addr: str) -> bool:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
-    if ip.version == 4:
+    if ip.version == VERSION_4:
         return any(ip in net for net in EXCLUDED_V4)
     return any(ip in net for net in EXCLUDED_V6)
 
@@ -69,11 +87,11 @@ class PacketInfo:
     outbound: bool
     version: int
     proto: int
-    local_port: int      # -1 when unknown (non-first fragment)
+    local_port: int  # -1 when unknown (non-first fragment)
     remote_port: int
     remote_addr: str
-    size: int            # bytes on the wire (IP total length as captured)
-    payload_len: int     # transport payload (0 for pure ACKs)
+    size: int  # bytes on the wire (IP total length as captured)
+    payload_len: int  # transport payload (0 for pure ACKs)
     tcp_flags: int
 
     @property
@@ -98,9 +116,7 @@ class PacketInfo:
         """Traffic that must bypass the shaper: pure ACKs, DNS, ICMP."""
         if self.is_icmp or self.is_pure_ack:
             return True
-        if self.proto == PROTO_UDP and DNS_PORT in (self.local_port, self.remote_port):
-            return True
-        return False
+        return bool(self.proto == PROTO_UDP and DNS_PORT in (self.local_port, self.remote_port))
 
     @property
     def is_local_remote(self) -> bool:
@@ -129,41 +145,50 @@ def inspect(raw: bytes | memoryview, outbound: bool) -> PacketInfo | None:
 
     Accepts ``bytes``, ``bytearray`` and ``memoryview`` (what pydivert actually gives us).
     """
-    if len(raw) < 20:
+    if len(raw) < IPV4_MIN_HEADER:
         return None
     version = raw[0] >> 4
 
-    if version == 4:
+    if version == VERSION_4:
         header_len = (raw[0] & 0x0F) * 4
-        if header_len < 20 or len(raw) < header_len:
+        if header_len < IPV4_MIN_HEADER or len(raw) < header_len:
             return None
         total_len = struct.unpack_from("!H", raw, 2)[0]
-        proto = raw[9]
+        proto = raw[IPV4_PROTO_FIELD]
         frag_offset = struct.unpack_from("!H", raw, 6)[0] & 0x1FFF
         src, dst = _addr_v4(raw)
         ip_header_end = header_len
         if frag_offset != 0:
             # A fragment past the first one has no transport header to look at.
             proto_known = proto
-            return PacketInfo(outbound, 4, proto_known, -1, -1,
-                              dst if outbound else src, max(total_len, len(raw)), 0, 0)
-    elif version == 6:
-        if len(raw) < 40:
+            return PacketInfo(
+                outbound,
+                VERSION_4,
+                proto_known,
+                -1,
+                -1,
+                dst if outbound else src,
+                max(total_len, len(raw)),
+                0,
+                0,
+            )
+    elif version == VERSION_6:
+        if len(raw) < IPV6_HEADER:
             return None
         payload_len = struct.unpack_from("!H", raw, 4)[0]
-        total_len = 40 + payload_len
-        proto = raw[6]
+        total_len = IPV6_HEADER + payload_len
+        proto = raw[IPV6_NEXT_HEADER_FIELD]
         src, dst = _addr_v6(raw)
-        ip_header_end = 40
+        ip_header_end = IPV6_HEADER
         # Walk extension headers to find the real transport protocol.
         guard = 0
-        while proto in (0, 43, 44, 51, 60) and guard < 8:
+        while proto in EXT_HEADERS and guard < MAX_EXT_HEADERS:
             if len(raw) < ip_header_end + 2:
                 return None
             nxt = raw[ip_header_end]
-            if proto == 44:
-                step = 8
-            elif proto == 51:
+            if proto == EXT_FRAGMENT:
+                step = EXT_FRAGMENT_LEN
+            elif proto == EXT_AH:
                 step = (raw[ip_header_end + 1] + 2) * 4
             else:
                 step = (raw[ip_header_end + 1] + 1) * 8
@@ -172,9 +197,18 @@ def inspect(raw: bytes | memoryview, outbound: bool) -> PacketInfo | None:
             ip_header_end += step
             proto = nxt
             guard += 1
-        if proto in (44, 59):
-            return PacketInfo(outbound, 6, proto, -1, -1,
-                              dst if outbound else src, max(total_len, len(raw)), 0, 0)
+        if proto in (EXT_FRAGMENT, EXT_NO_NEXT):
+            return PacketInfo(
+                outbound,
+                VERSION_6,
+                proto,
+                -1,
+                -1,
+                dst if outbound else src,
+                max(total_len, len(raw)),
+                0,
+                0,
+            )
     else:
         return None
 
@@ -183,17 +217,17 @@ def inspect(raw: bytes | memoryview, outbound: bool) -> PacketInfo | None:
     payload_len = 0
     tcp_flags = 0
 
-    if proto == PROTO_TCP and len(raw) >= ip_header_end + 20:
+    if proto == PROTO_TCP and len(raw) >= ip_header_end + TCP_MIN_HEADER:
         sport, dport = struct.unpack_from("!HH", raw, ip_header_end)
         data_offset = (raw[ip_header_end + 12] >> 4) * 4
         tcp_flags = raw[ip_header_end + 13]
         transport_len = max(size - ip_header_end - data_offset, 0)
         payload_len = transport_len
         local_port, remote_port = (sport, dport) if outbound else (dport, sport)
-    elif proto == PROTO_UDP and len(raw) >= ip_header_end + 8:
+    elif proto == PROTO_UDP and len(raw) >= ip_header_end + UDP_HEADER:
         sport, dport = struct.unpack_from("!HH", raw, ip_header_end)
-        udp_len = struct.unpack_from("!H", raw, ip_header_end + 4)[0]
-        payload_len = max(udp_len - 8, 0)
+        udp_len = struct.unpack_from("!H", raw, ip_header_end + UDP_LENGTH_FIELD)[0]
+        payload_len = max(udp_len - UDP_HEADER, 0)
         local_port, remote_port = (sport, dport) if outbound else (dport, sport)
     elif proto in (PROTO_ICMP, PROTO_ICMPV6):
         local_port = remote_port = -1
@@ -216,13 +250,11 @@ def should_pass_through(info: PacketInfo, *, exempt_control: bool, limit_ipv6: b
     if info.local_port < 0:
         # Fragment we cannot attribute to a process: never hold it back.
         return True
-    if info.version == 6 and not limit_ipv6:
+    if info.version == VERSION_6 and not limit_ipv6:
         return True
     if info.is_local_remote:
         return True
-    if exempt_control and info.is_control:
-        return True
-    return False
+    return bool(exempt_control and info.is_control)
 
 
 def inspect_safe(raw: bytes | memoryview, outbound: bool) -> PacketInfo | None:
@@ -234,21 +266,98 @@ def inspect_safe(raw: bytes | memoryview, outbound: bool) -> PacketInfo | None:
     """
     try:
         return inspect(raw, outbound)
-    except Exception:  # noqa: BLE001 - deliberate catch-all on the hot path
+    except Exception:
         return None
 
 
 #: Synthetic packets used by :func:`self_test` and by the tests (TCP from 51000 to 443).
-SELF_TEST_IPV4 = bytes([
-    0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00,
-    192, 168, 1, 10, 8, 8, 8, 8,
-    0xC7, 0x38, 0x01, 0xBB, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x02, 0xFF, 0xFF, 0, 0, 0, 0,
-])
-SELF_TEST_IPV6 = bytes([
-    0x60, 0x00, 0x00, 0x00, 0x00, 0x14, 0x06, 0x40,
-    0xFE, 0x80] + [0] * 13 + [0x01] + [0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88,
-    0xC7, 0x38, 0x01, 0xBB, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x02, 0xFF, 0xFF, 0, 0, 0, 0,
-])
+SELF_TEST_IPV4 = bytes(
+    [
+        0x45,
+        0x00,
+        0x00,
+        0x28,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x40,
+        0x06,
+        0x00,
+        0x00,
+        192,
+        168,
+        1,
+        10,
+        8,
+        8,
+        8,
+        8,
+        0xC7,
+        0x38,
+        0x01,
+        0xBB,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0x50,
+        0x02,
+        0xFF,
+        0xFF,
+        0,
+        0,
+        0,
+        0,
+    ]
+)
+SELF_TEST_IPV6 = bytes(
+    [0x60, 0x00, 0x00, 0x00, 0x00, 0x14, 0x06, 0x40, 0xFE, 0x80]
+    + [0] * 13
+    + [0x01]
+    + [
+        0x20,
+        0x01,
+        0x48,
+        0x60,
+        0x48,
+        0x60,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0x88,
+        0x88,
+        0xC7,
+        0x38,
+        0x01,
+        0xBB,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0x50,
+        0x02,
+        0xFF,
+        0xFF,
+        0,
+        0,
+        0,
+        0,
+    ]
+)
 
 #: (raw packet, version, local IP as a string, remote address, remote endpoint)
 _SELF_TEST_CASES = (
@@ -270,8 +379,10 @@ def self_test() -> tuple[bool, str]:
             if out is None:
                 return False, f"no se pudo analizar un paquete ipv{version} saliente"
             if (out.version, out.local_port, out.remote_port) != (version, 51000, 443):
-                return False, (f"puertos incorrectos al analizar ipv{version}: "
-                               f"{out.local_port} -> {out.remote_port}")
+                return False, (
+                    f"puertos incorrectos al analizar ipv{version}: "
+                    f"{out.local_port} -> {out.remote_port}"
+                )
             if out.remote_addr != remote_ip:
                 return False, f"dirección remota incorrecta en ipv{version}: {out.remote_addr}"
 

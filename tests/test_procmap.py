@@ -1,4 +1,5 @@
 """Process-mapping tests against real sockets owned by this test process."""
+
 from __future__ import annotations
 
 import os
@@ -62,7 +63,7 @@ def test_socket_events_fill_gaps_the_poll_does_not_know():
     pmap.refresh()
     pmap.note_socket_event(6, 59999, 4321)
     assert pmap.pid_for(6, 59999) == 4321
-    assert pmap.pid_for(17, 59999) is None      # protocol must match
+    assert pmap.pid_for(17, 59999) is None  # protocol must match
     assert pmap.pid_for(6, -1) is None
-    pmap.note_socket_event(99, 1234, 4321)      # unsupported protocol ignored
+    pmap.note_socket_event(99, 1234, 4321)  # unsupported protocol ignored
     assert pmap.pid_for(99, 1234) is None

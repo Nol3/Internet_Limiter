@@ -1,4 +1,5 @@
 """Configuration, rule matching and unit-conversion tests."""
+
 from __future__ import annotations
 
 import json
@@ -14,10 +15,14 @@ MB = 1024 * 1024
 def test_round_trip_save_and_load(tmp_path):
     path = tmp_path / "config.json"
     config = Config(
-        settings=Settings(global_down_bps=2 * MB, global_up_bps=0.5 * MB,
-                          max_delay_ms=30, exempt_control=False),
-        rules=[AppRule(exe=r"C:\Program Files\App\app.exe", name="App",
-                       down_bps=1 * MB, up_bps=100 * 1024)],
+        settings=Settings(
+            global_down_bps=2 * MB, global_up_bps=0.5 * MB, max_delay_ms=30, exempt_control=False
+        ),
+        rules=[
+            AppRule(
+                exe=r"C:\Program Files\App\app.exe", name="App", down_bps=1 * MB, up_bps=100 * 1024
+            )
+        ],
     )
     config.save(path)
     loaded = Config.load(path)
@@ -84,15 +89,18 @@ def test_config_path_is_under_appdata():
     assert "Limitador" in str(config_path())
 
 
-@pytest.mark.parametrize("text,unit,expected", [
-    ("1", "MB/s", MB),
-    ("0", "MB/s", 0),
-    ("", "MB/s", 0),
-    ("1,5", "MB/s", 1.5 * MB),
-    ("1.5", "MB/s", 1.5 * MB),
-    ("512", "KB/s", 512 * 1024),
-    ("8", "Mbit/s", 1_000_000),
-])
+@pytest.mark.parametrize(
+    "text,unit,expected",
+    [
+        ("1", "MB/s", MB),
+        ("0", "MB/s", 0),
+        ("", "MB/s", 0),
+        ("1,5", "MB/s", 1.5 * MB),
+        ("1.5", "MB/s", 1.5 * MB),
+        ("512", "KB/s", 512 * 1024),
+        ("8", "Mbit/s", 1_000_000),
+    ],
+)
 def test_parse_rate(text, unit, expected):
     assert parse_rate(text, unit) == pytest.approx(expected)
 
@@ -109,6 +117,6 @@ def test_formatting_helpers():
     assert format_rate(2 * MB) == "2 MB/s"
     assert format_rate(512 * 1024) == "512 KB/s"
     assert format_bytes(0) == "0 B"
-    assert format_bytes(2 * 1024 ** 3) == "2.00 GB"
+    assert format_bytes(2 * 1024**3) == "2.00 GB"
     assert to_display(0) == ""
     assert to_display(1.5 * MB) == "1.5"

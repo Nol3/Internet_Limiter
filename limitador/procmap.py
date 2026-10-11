@@ -12,6 +12,7 @@ Two sources are merged, because neither is complete on its own:
 Keys are ``(protocol, local_port)``; values are PIDs. Local ports are per-protocol, so
 TCP and UDP need separate keys.
 """
+
 from __future__ import annotations
 
 import ctypes
@@ -108,23 +109,41 @@ def enum_endpoints() -> dict[tuple[int, int], int]:
             result[(17, _port(row.dwLocalPort))] = row.dwOwningPid
 
     try:
-        add_tcp(_query_table(_iphlpapi.GetExtendedTcpTable, MIB_TCPROW_OWNER_PID,
-                             AF_INET, TCP_TABLE_OWNER_PID_ALL))
+        add_tcp(
+            _query_table(
+                _iphlpapi.GetExtendedTcpTable,
+                MIB_TCPROW_OWNER_PID,
+                AF_INET,
+                TCP_TABLE_OWNER_PID_ALL,
+            )
+        )
     except OSError as exc:  # pragma: no cover - defensive
         log.warning("TCP table (v4) failed: %s", exc)
     try:
-        add_tcp(_query_table(_iphlpapi.GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID,
-                             AF_INET6, TCP_TABLE_OWNER_PID_ALL))
+        add_tcp(
+            _query_table(
+                _iphlpapi.GetExtendedTcpTable,
+                MIB_TCP6ROW_OWNER_PID,
+                AF_INET6,
+                TCP_TABLE_OWNER_PID_ALL,
+            )
+        )
     except OSError as exc:  # pragma: no cover
         log.warning("TCP table (v6) failed: %s", exc)
     try:
-        add_udp(_query_table(_iphlpapi.GetExtendedUdpTable, MIB_UDPROW_OWNER_PID,
-                             AF_INET, UDP_TABLE_OWNER_PID))
+        add_udp(
+            _query_table(
+                _iphlpapi.GetExtendedUdpTable, MIB_UDPROW_OWNER_PID, AF_INET, UDP_TABLE_OWNER_PID
+            )
+        )
     except OSError as exc:  # pragma: no cover
         log.warning("UDP table (v4) failed: %s", exc)
     try:
-        add_udp(_query_table(_iphlpapi.GetExtendedUdpTable, MIB_UDP6ROW_OWNER_PID,
-                             AF_INET6, UDP_TABLE_OWNER_PID))
+        add_udp(
+            _query_table(
+                _iphlpapi.GetExtendedUdpTable, MIB_UDP6ROW_OWNER_PID, AF_INET6, UDP_TABLE_OWNER_PID
+            )
+        )
     except OSError as exc:  # pragma: no cover
         log.warning("UDP table (v6) failed: %s", exc)
     return result
@@ -238,8 +257,11 @@ class ProcessMap:
 
     def port_count(self, pid: int) -> int:
         with self._lock:
-            return sum(1 for owner in list(self._ports.values()) + list(self._event_ports.values())
-                       if owner == pid)
+            return sum(
+                1
+                for owner in list(self._ports.values()) + list(self._event_ports.values())
+                if owner == pid
+            )
 
     @property
     def size(self) -> int:

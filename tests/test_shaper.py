@@ -3,6 +3,7 @@
 Everything runs on a fake clock, so the tests are deterministic and need no admin
 rights, no network and no driver.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -59,7 +60,7 @@ def test_paces_to_the_configured_rate():
     size = 1500
     packets = 400
     elapsed = pace_with_sleeps(shaper, clock, packets, size)
-    expected = (packets - 1) * size / rate      # first packet is immediate
+    expected = (packets - 1) * size / rate  # first packet is immediate
     assert elapsed == pytest.approx(expected, rel=0.02)
 
 
@@ -89,9 +90,9 @@ def test_idle_shaper_never_drops_even_a_packet_bigger_than_the_burst():
     dropping it would blackhole the connection at very low limits."""
     clock = FakeClock()
     rate = 8 * KB
-    shaper = Shaper(rate, max_delay_ms=10, clock=clock)         # budget = min 3000 B
+    shaper = Shaper(rate, max_delay_ms=10, clock=clock)  # budget = min 3000 B
     allow, wait = shaper.plan(65_000, queued_bytes=0)
-    assert allow is True and wait == 0.0                        # first packet goes now
+    assert allow is True and wait == 0.0  # first packet goes now
     # The oversized packet is paid for by the next one instead of being discarded.
     allow, wait = shaper.plan(65_000, queued_bytes=0)
     assert allow is True
@@ -100,7 +101,7 @@ def test_idle_shaper_never_drops_even_a_packet_bigger_than_the_burst():
 
 def test_aqm_drops_when_the_queue_exceeds_the_delay_budget():
     clock = FakeClock()
-    shaper = Shaper(100 * KB, max_delay_ms=50, clock=clock)     # budget = 5 KB
+    shaper = Shaper(100 * KB, max_delay_ms=50, clock=clock)  # budget = 5 KB
     allow, wait = shaper.plan(1500, queued_bytes=shaper.burst_bytes)
     assert allow is False and wait == 0.0
     assert shaper.snapshot()["aqm_drops"] == 1
@@ -114,7 +115,7 @@ def test_queue_within_the_budget_is_accepted_and_delayed():
 
 
 def test_the_budget_is_never_smaller_than_two_packets():
-    shaper = Shaper(1 * KB, max_delay_ms=5)                      # 1KB/s * 5ms = 5 bytes
+    shaper = Shaper(1 * KB, max_delay_ms=5)  # 1KB/s * 5ms = 5 bytes
     assert shaper.burst_bytes >= MIN_BURST_BYTES
 
 
@@ -158,7 +159,7 @@ def test_sub_millisecond_waits_are_batched_not_slept():
 def test_a_long_wait_is_slept_in_chunks():
     clock = FakeClock()
     shaper = Shaper(100 * KB, max_delay_ms=50, clock=clock)
-    shaper.plan(1500)                      # first packet goes out now
+    shaper.plan(1500)  # first packet goes out now
     allow, wait = shaper.plan(1500)
     assert allow and wait >= MIN_SLEEP_SECONDS
     started = clock.t
@@ -177,7 +178,7 @@ def test_set_rate_applies_immediately():
     shaper = Shaper(1 * MB, max_delay_ms=50, clock=clock)
     shaper.set_rate(100 * KB)
     allow, wait = shaper.plan(4000)
-    assert allow and wait == 0.0                 # fresh shaper: first packet is immediate
+    assert allow and wait == 0.0  # fresh shaper: first packet is immediate
     allow, wait = shaper.plan(4000)
     assert allow and wait == pytest.approx(4000 / (100 * KB))
     assert shaper.burst_bytes == pytest.approx(100 * KB * 0.05)
@@ -210,7 +211,7 @@ def test_rate_meter_uses_a_sliding_window():
     clock = MeterClock()
     meter = RateMeter(window=1.0, clock=clock)
     for _ in range(1000):
-        meter.add(1000)          # 1,000,000 bytes within the same instant
+        meter.add(1000)  # 1,000,000 bytes within the same instant
     assert meter.rate() == pytest.approx(1_000_000, rel=1e-6)
     assert meter.total == 1_000_000
     clock.t += 1.5

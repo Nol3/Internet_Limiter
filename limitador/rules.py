@@ -3,6 +3,7 @@
 Persisted as JSON in ``%APPDATA%\\Limitador\\config.json`` so a portable copy of the app
 and an installed copy share settings per user.
 """
+
 from __future__ import annotations
 
 import json
@@ -55,12 +56,12 @@ class Settings:
     global_down_bps: float = 0.0
     global_up_bps: float = 0.0
     max_delay_ms: float = 50.0
-    exempt_control: bool = True      # never shape pure ACKs / DNS / ICMP
-    exclude_lan: bool = True         # never shape traffic to/from local networks
+    exempt_control: bool = True  # never shape pure ACKs / DNS / ICMP
+    exclude_lan: bool = True  # never shape traffic to/from local networks
     limit_ipv6: bool = True
     minimize_to_tray: bool = True
     autostart: bool = False
-    start_on_launch: bool = False    # begin limiting as soon as the app opens
+    start_on_launch: bool = False  # begin limiting as soon as the app opens
 
     def clamp(self) -> None:
         self.global_down_bps = max(0.0, float(self.global_down_bps))
@@ -128,7 +129,7 @@ class Config:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Config":
+    def from_dict(cls, data: dict) -> Config:
         settings = Settings(**(data.get("settings") or {}))
         rules = []
         for raw in data.get("rules") or []:
@@ -150,7 +151,7 @@ class Config:
         os.replace(tmp, target)
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "Config":
+    def load(cls, path: Path | None = None) -> Config:
         target = path or config_path()
         try:
             data = json.loads(target.read_text(encoding="utf-8"))

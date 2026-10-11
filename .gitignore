@@ -17,6 +17,7 @@ installer_output/
 tools/acceptance_output.txt
 tools/live_output.txt
 tools/frozen_*.txt
+tools/*_output.txt
 tools/*.json
 
 # --- Python ---

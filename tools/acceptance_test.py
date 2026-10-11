@@ -22,6 +22,7 @@ Two independent measurements per phase: the size of the file curl writes, and th
 own byte counters. A phase whose download transferred almost nothing is reported as a
 *failed measurement* (mirror blocked / rate limited), never as a limiter failure.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,15 +37,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from limitador import driver  # noqa: E402
-from limitador.console import ensure_utf8_console  # noqa: E402
-from limitador.engine import Engine, LimiterError  # noqa: E402
-from limitador.rules import AppRule, Config, Settings  # noqa: E402
-from limitador.units import MB  # noqa: E402
+from limitador import driver
+from limitador.console import ensure_utf8_console
+from limitador.engine import Engine, LimiterError
+from limitador.rules import AppRule, Config, Settings
+from limitador.units import MB
 
 CURL = r"C:\Windows\System32\curl.exe"
 CREATE_NO_WINDOW = 0x08000000
-NUL = "NUL"                      # Windows device: accepted natively by curl.exe
+NUL = "NUL"  # Windows device: accepted natively by curl.exe
 PROBE_BYTES = 10 * MB
 MIN_MEASURABLE = 1 * MB
 
@@ -52,11 +53,15 @@ MIN_MEASURABLE = 1 * MB
 # --------------------------------------------------------------------------- safety
 def install_watchdog(seconds: float) -> None:
     """Hard stop: killing this process releases the capture and the network."""
+
     def kill() -> None:
         time.sleep(seconds)
-        print(f"\n[vigilante] se superó el tiempo máximo ({seconds:.0f}s). Cerrando el proceso "
-              "para liberar la red (al morir el proceso se cierran los descriptores de "
-              "WinDivert).", flush=True)
+        print(
+            f"\n[vigilante] se superó el tiempo máximo ({seconds:.0f}s). Cerrando el proceso "
+            "para liberar la red (al morir el proceso se cierran los descriptores de "
+            "WinDivert).",
+            flush=True,
+        )
         os._exit(9)
 
     threading.Thread(target=kill, name="watchdog", daemon=True).start()
@@ -85,11 +90,23 @@ class Mirror:
     @classmethod
     def _probe(cls, url: str) -> float:
         """Bytes/second of a ranged request, or 0.0 if the server is not usable."""
-        argv = [CURL, "-sS", "-r", f"0-{PROBE_BYTES}", "-o", NUL, "--max-time", "8",
-                "-w", "%{http_code} %{size_download} %{speed_download}", url]
+        argv = [
+            CURL,
+            "-sS",
+            "-r",
+            f"0-{PROBE_BYTES}",
+            "-o",
+            NUL,
+            "--max-time",
+            "8",
+            "-w",
+            "%{http_code} %{size_download} %{speed_download}",
+            url,
+        ]
         try:
-            result = subprocess.run(argv, capture_output=True, text=True,
-                                    creationflags=CREATE_NO_WINDOW, timeout=25)
+            result = subprocess.run(
+                argv, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW, timeout=25
+            )
         except (OSError, subprocess.TimeoutExpired):
             return 0.0
         parts = (result.stdout or "").strip().split()
@@ -105,7 +122,7 @@ class Mirror:
         return speed
 
     @classmethod
-    def select(cls, verbose: bool = True) -> "Mirror | None":
+    def select(cls, verbose: bool = True) -> Mirror | None:
         best: Mirror | None = None
         for url in cls.CANDIDATES:
             speed = cls._probe(url)
@@ -133,7 +150,8 @@ class Download:
         with open(self.error_path, "wb") as error_stream:
             self.process = subprocess.Popen(
                 [CURL, "-sS", "-o", str(self.file), self.mirror.url],
-                stdout=subprocess.DEVNULL, stderr=error_stream,
+                stdout=subprocess.DEVNULL,
+                stderr=error_stream,
                 creationflags=CREATE_NO_WINDOW,
             )
 
@@ -168,7 +186,8 @@ class Download:
                 samples.append((time.monotonic() - started, self.file_bytes()))
                 if engine is not None:
                     engine_samples.append(
-                        (time.monotonic() - started, engine.snapshot().bytes_down))
+                        (time.monotonic() - started, engine.snapshot().bytes_down)
+                    )
         finally:
             if self.process.poll() is None:
                 self.process.terminate()
@@ -189,8 +208,7 @@ class Download:
         return result
 
 
-def _rate(samples: list[tuple[float, int]], mode: str = "mean",
-          skip_seconds: float = 1.2) -> float:
+def _rate(samples: list[tuple[float, int]], mode: str = "mean", skip_seconds: float = 1.2) -> float:
     """Sustained bytes/second from a counter sampled at irregular intervals.
 
     The first ``skip_seconds`` are ignored: TCP ramp-up, and the up to one second it takes
@@ -199,7 +217,8 @@ def _rate(samples: list[tuple[float, int]], mode: str = "mean",
     deltas = [
         (samples[i][1] - samples[i - 1][1]) / (samples[i][0] - samples[i - 1][0])
         for i in range(1, len(samples))
-        if samples[i][0] > samples[i - 1][0] and samples[i][1] > samples[i - 1][1]
+        if samples[i][0] > samples[i - 1][0]
+        and samples[i][1] > samples[i - 1][1]
         and samples[i][0] >= skip_seconds
     ]
     if not deltas:
@@ -220,11 +239,21 @@ def start_engine(config: Config) -> Engine:
 
 def http_probe() -> tuple[bool, str]:
     """A tiny real request: proves packets are being reinjected while we capture."""
-    argv = [CURL, "-sS", "-o", NUL, "--max-time", "8", "-w", "%{http_code} %{time_total}s",
-            "https://proof.ovh.net/files/1Mb.dat"]
+    argv = [
+        CURL,
+        "-sS",
+        "-o",
+        NUL,
+        "--max-time",
+        "8",
+        "-w",
+        "%{http_code} %{time_total}s",
+        "https://proof.ovh.net/files/1Mb.dat",
+    ]
     try:
-        result = subprocess.run(argv, capture_output=True, text=True,
-                                creationflags=CREATE_NO_WINDOW, timeout=20)
+        result = subprocess.run(
+            argv, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW, timeout=20
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"curl no respondió: {exc}"
     output = (result.stdout or "").strip()
@@ -239,8 +268,12 @@ def label(value: float) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=float, default=5.0, help="duración de cada fase")
-    parser.add_argument("--watchdog", type=float, default=0.0,
-                        help="segundos máximos de toda la prueba (0 = automático)")
+    parser.add_argument(
+        "--watchdog",
+        type=float,
+        default=0.0,
+        help="segundos máximos de toda la prueba (0 = automático)",
+    )
     args = parser.parse_args()
 
     watchdog = args.watchdog if args.watchdog > 0 else args.seconds * 12 + 90
@@ -254,7 +287,7 @@ def main() -> int:
         print(f"[FALLA] no encuentro {CURL}")
         return 3
 
-    ok, detail = driver.prepare()
+    _ok, detail = driver.prepare()
     print(f"driver: {detail}")
     print(driver.diagnose())
     print()
@@ -267,8 +300,10 @@ def main() -> int:
     snapshot = monitor.snapshot()
     monitor.stop()
     print(f"   petición HTTP con el motor activo: {probe_detail}")
-    print(f"   paquetes reenviados: bajada {snapshot.forwarded_down} B, "
-          f"subida {snapshot.forwarded_up} B")
+    print(
+        f"   paquetes reenviados: bajada {snapshot.forwarded_down} B, "
+        f"subida {snapshot.forwarded_up} B"
+    )
     print(f"   capturados: bajada {snapshot.bytes_down} B, subida {snapshot.bytes_up} B")
     if not forwarded or snapshot.bytes_down <= 0:
         print("\n[FALLA] con el motor activo no hay conectividad. Se aborta sin aplicar límites.")
@@ -287,8 +322,10 @@ def main() -> int:
     line_rate = baseline["file_rate"]
     print(f"   velocidad de línea: {label(line_rate)} ({baseline['total_mb']:.0f} MB)")
     if line_rate < 1 * MB:
-        print("[FALLA] el espejo no dio ancho de banda suficiente para medir: "
-              f"{baseline['error'][:120]}")
+        print(
+            "[FALLA] el espejo no dio ancho de banda suficiente para medir: "
+            f"{baseline['error'][:120]}"
+        )
         return 2
 
     target = max(line_rate / 3.0, 512 * 1024)
@@ -302,9 +339,11 @@ def main() -> int:
     snapshot = engine.snapshot()
     engine.stop()
     del config
-    print(f"   medido por archivo:  {label(limited['file_rate'])} "
-          f"({limited['file_rate'] / target * 100:.0f}% del objetivo, "
-          f"{limited['total_mb']:.0f} MB)")
+    print(
+        f"   medido por archivo:  {label(limited['file_rate'])} "
+        f"({limited['file_rate'] / target * 100:.0f}% del objetivo, "
+        f"{limited['total_mb']:.0f} MB)"
+    )
     print(f"   medido por el motor: {label(limited['engine_rate'])}")
     if limited["total_mb"] < 1:
         invalid.append(f"fase 2 sin datos ({limited['error'][:80]})")
@@ -318,13 +357,17 @@ def main() -> int:
     snapshot_app = engine.snapshot()
     engine.stop()
     app_shaper = snapshot_app.shapers.get("app:" + Config.normalise_exe(CURL) + ":in")
-    print(f"   medido por archivo:  {label(per_app['file_rate'])} "
-          f"({per_app['file_rate'] / target * 100:.0f}% del objetivo, "
-          f"{per_app['total_mb']:.0f} MB)")
+    print(
+        f"   medido por archivo:  {label(per_app['file_rate'])} "
+        f"({per_app['file_rate'] / target * 100:.0f}% del objetivo, "
+        f"{per_app['total_mb']:.0f} MB)"
+    )
     print(f"   medido por el motor: {label(per_app['engine_rate'])}")
     print(f"   shaper de la regla por aplicación: {'creado' if app_shaper else 'NO CREADO'}")
-    print(f"   capa de sockets: {'activa' if snapshot_app.socket_events_ok else 'no disponible'} · "
-          f"puertos identificados: {snapshot_app.port_entries}")
+    print(
+        f"   capa de sockets: {'activa' if snapshot_app.socket_events_ok else 'no disponible'} · "
+        f"puertos identificados: {snapshot_app.port_entries}"
+    )
     if per_app["total_mb"] < 1:
         invalid.append(f"fase 3 sin datos ({per_app['error'][:80]})")
 
@@ -351,10 +394,14 @@ def main() -> int:
     print(f"  espejo:                 {mirror.name}")
     print(f"  línea:                  {label(line_rate)}")
     print(f"  objetivo:               {label(target)}")
-    print(f"  límite global:          {label(limited['file_rate'])} "
-          f"(motor {label(limited['engine_rate'])})")
-    print(f"  límite por aplicación:  {label(per_app['file_rate'])} "
-          f"(motor {label(per_app['engine_rate'])})")
+    print(
+        f"  límite global:          {label(limited['file_rate'])} "
+        f"(motor {label(limited['engine_rate'])})"
+    )
+    print(
+        f"  límite por aplicación:  {label(per_app['file_rate'])} "
+        f"(motor {label(per_app['engine_rate'])})"
+    )
     dropped = (snapshot.dropped_down + snapshot_app.dropped_down) / MB
     print(f"  descartado (bajada):    {dropped:.2f} MB")
     released = snapshot.released or snapshot_app.released

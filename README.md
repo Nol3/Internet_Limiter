@@ -8,6 +8,9 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-Apache%202.0-green)
 ![Version](https://img.shields.io/badge/version-2.0.0-brightgreen)
+![CI](https://github.com/Nol3/Internet_Limiter/actions/workflows/ci.yml/badge.svg)
+
+**¿Quieres verlo funcionando?** → [DEMO.md](DEMO.md): guion de 3 minutos con mediciones reales.
 
 ---
 
@@ -36,6 +39,25 @@ Prueba de aceptación automatizada (`tools/acceptance_test.py`) sobre una línea
 
 Precisión del planificador medida en tiempo real (`tools/pacing_check.py`):
 30 MB/s → 100,0 %, 10 MB/s → 100,0 %, 3 MB/s → 100,0 %, 0,5 MB/s → 100,2 %.
+
+Para repetirlo en tu equipo: `tools\demo.cmd` (tres mediciones reales, pide UAC una vez) o
+`tools\run_elevated.ps1` (prueba completa, fases 0-3).
+
+### La interfaz
+
+Capturas generadas por la propia aplicación (`Limitador.exe --screenshot docs\img --demo`):
+
+| General | Aplicaciones |
+|---------|--------------|
+| ![Pestaña General](docs/img/gui-general.png) | ![Pestaña Aplicaciones](docs/img/gui-aplicaciones.png) |
+| Límite de todo el equipo, en caliente | Qué app consume qué, y su límite propio |
+
+| Avanzado | Registro |
+|----------|----------|
+| ![Pestaña Avanzado](docs/img/gui-avanzado.png) | ![Pestaña Registro](docs/img/gui-registro.png) |
+| Retardo, tráfico de control, IPv6, bandeja, inicio | Todo lo que hace el motor, en texto |
+
+*(En las capturas se usan límites de ejemplo en memoria para que se vea la interfaz en uso.)*
 
 ---
 
@@ -192,19 +214,32 @@ build_installer.bat   :: lo anterior + installer_output\Setup_Limitador_2.0.0.ex
 ```bat
 uv venv .venv --python 3.13
 uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
-.venv\Scripts\python.exe -m pytest tests -q     :: 102 pruebas, sin driver ni admin
-.venv\Scripts\python.exe main.py                :: app en modo desarrollo (auto-eleva)
+.venv\Scripts\python.exe -m pytest tests -q          :: 102 pruebas, sin driver ni admin
+.venv\Scripts\python.exe -m ruff check .             :: análisis estático (0 avisos)
+.venv\Scripts\python.exe -m ruff format --check .    :: formato
+.venv\Scripts\python.exe main.py                     :: app en modo desarrollo (auto-eleva)
+.venv\Scripts\python.exe main.py --screenshot docs\img --demo   :: capturas de la interfaz
 ```
+
+El mismo control corre en cada push mediante GitHub Actions (`.github/workflows/ci.yml`):
+ruff, las 102 pruebas, el ejecutable y el instalador.
 
 ### Herramientas de verificación
 
 | Herramienta | Qué hace | Necesita admin |
 |-------------|----------|----------------|
+| `tools\demo.cmd` | Demostración guiada: 3 mediciones reales (referencia, global, por aplicación) | Pide UAC |
 | `tools\pacing_check.py` | Precisión del planificador en tiempo real | No |
 | `tools\acceptance_test.py` | Prueba de aceptación completa en la red real (fases 0-3) | Sí |
-| `tools\run_elevated.ps1` | Lanza la prueba con UAC y la mata si se pasa de tiempo | Pide UAC |
+| `tools\run_elevated.ps1` | Lanza cualquier script de `tools\` con UAC y lo mata si se pasa de tiempo | Pide UAC |
 | `tools\live_check.ps1` | Limitador en consola + tráfico real, para diagnóstico en vivo | Pide UAC |
 | `tools\unblock.cmd` | Recuperación de emergencia de la red | Sí |
+
+Y desde el propio ejecutable:
+
+```bat
+Limitador.exe --screenshot docs\img --demo   :: captura cada pestaña (documentación/verificación)
+```
 
 ---
 
@@ -226,10 +261,13 @@ Internet_Limiter/
 │   ├── autostart.py    # tarea programada de inicio
 │   └── units.py, console.py
 ├── tests/              # 102 pruebas (planificador, filtros, clasificación, motor con handle falso)
-├── tools/              # verificación y recuperación
-├── docs/               # arquitectura, auditoría de la v1, diagnóstico
+├── tools/              # demo guiada, verificación y recuperación
+├── docs/               # arquitectura, auditoría de la v1, capturas de la interfaz (img/)
+├── .github/workflows/  # integración continua: ruff + pruebas + ejecutable + instalador
+├── DEMO.md             # guion de demostración (3 minutos)
 ├── main.py             # punto de entrada
 ├── Limitador.spec      # receta de PyInstaller
+├── pyproject.toml      # configuración de ruff y pytest
 ├── build.bat / build_installer.bat / installer.iss
 └── requirements.txt / requirements-dev.txt
 ```

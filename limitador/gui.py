@@ -8,14 +8,17 @@ Threading rules followed here:
 * every rate is computed in the UI thread from two snapshots of monotonically
   increasing byte counters, which keeps the packet path free of locks.
 """
+
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
 import tkinter as tk
 from collections import deque
+from contextlib import suppress
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -23,7 +26,7 @@ from . import autostart, driver
 from .engine import Engine, EngineEvent, LimiterError, Snapshot
 from .procmap import ProcessMap
 from .rules import APP_VERSION, AppRule, Config, log_path
-from .units import MB, UNITS, format_bytes, format_duration, format_rate, parse_rate, to_display
+from .units import UNITS, format_bytes, format_duration, format_rate, parse_rate, to_display
 
 BG = "#1e1e1e"
 BG_ALT = "#252526"
@@ -42,9 +45,15 @@ class _LogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self.sink.put_nowait(f"{time.strftime('%H:%M:%S')} {record.levelname:<7} {record.getMessage()}")
+            self.sink.put_nowait(
+                f"{time.strftime('%H:%M:%S')} {record.levelname:<7} {record.getMessage()}"
+            )
         except queue.Full:  # pragma: no cover
             pass
+
+
+#: Procesos del núcleo que nunca son aplicaciones limitables.
+SYSTEM_PIDS = frozenset({0, 4})
 
 
 class LimitadorApp(tk.Tk):
@@ -88,8 +97,10 @@ class LimitadorApp(tk.Tk):
 
     # --------------------------------------------------------------------- chrome
     def _set_icon(self) -> None:
-        for candidate in (Path(__file__).resolve().parent.parent / "Limitador.ico",
-                          Path(getattr(__import__("sys"), "_MEIPASS", "")) / "Limitador.ico"):
+        for candidate in (
+            Path(__file__).resolve().parent.parent / "Limitador.ico",
+            Path(getattr(__import__("sys"), "_MEIPASS", "")) / "Limitador.ico",
+        ):
             if candidate and candidate.exists():
                 try:
                     self.iconbitmap(str(candidate))
@@ -107,17 +118,26 @@ class LimitadorApp(tk.Tk):
         style.configure("Card.TLabel", background=BG_ALT, foreground=FG)
         style.configure("Muted.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 8))
         style.configure("Title.TLabel", background=BG, foreground=FG, font=("Segoe UI", 15, "bold"))
-        style.configure("Status.TLabel", background=BG, foreground=ACCENT, font=("Segoe UI", 10, "bold"))
+        style.configure(
+            "Status.TLabel", background=BG, foreground=ACCENT, font=("Segoe UI", 10, "bold")
+        )
         style.configure("Rate.TLabel", background=BG, foreground=FG, font=("Consolas", 11))
         style.configure("TEntry", fieldbackground="#2d2d2d", foreground=FG, insertcolor=FG)
         style.configure("TCombobox", fieldbackground="#2d2d2d", background="#2d2d2d", foreground=FG)
         style.configure("TButton", font=("Segoe UI", 9, "bold"), padding=5)
         style.configure("TCheckbutton", background=BG, foreground=FG)
         style.map("TCheckbutton", background=[("active", BG)], foreground=[("active", FG)])
-        style.configure("Treeview", background=BG_ALT, fieldbackground=BG_ALT, foreground=FG,
-                        rowheight=21, borderwidth=0)
-        style.configure("Treeview.Heading", background="#333", foreground=FG,
-                        font=("Segoe UI", 8, "bold"))
+        style.configure(
+            "Treeview",
+            background=BG_ALT,
+            fieldbackground=BG_ALT,
+            foreground=FG,
+            rowheight=21,
+            borderwidth=0,
+        )
+        style.configure(
+            "Treeview.Heading", background="#333", foreground=FG, font=("Segoe UI", 8, "bold")
+        )
         style.map("Treeview", background=[("selected", "#0e639c")])
         style.configure("TNotebook", background=BG, borderwidth=0)
         style.configure("TNotebook.Tab", background=BG_ALT, foreground=MUTED, padding=(12, 5))
@@ -128,38 +148,49 @@ class LimitadorApp(tk.Tk):
         header.pack(fill="x")
         ttk.Label(header, text=f"Limitador {APP_VERSION}", style="Title.TLabel").pack(side="left")
         self.status_var = tk.StringVar(value="Detenido")
-        ttk.Label(header, textvariable=self.status_var, style="Status.TLabel").pack(side="left", padx=12)
+        ttk.Label(header, textvariable=self.status_var, style="Status.TLabel").pack(
+            side="left", padx=12
+        )
 
         buttons = ttk.Frame(self, padding=(14, 0, 14, 8))
         buttons.pack(fill="x")
-        self.toggle_btn = ttk.Button(buttons, text="Iniciar limitación", command=self._toggle_engine)
+        self.toggle_btn = ttk.Button(
+            buttons, text="Iniciar limitación", command=self._toggle_engine
+        )
         self.toggle_btn.pack(side="left")
-        self.pause_btn = ttk.Button(buttons, text="Pausar", command=self._toggle_pause, state="disabled")
+        self.pause_btn = ttk.Button(
+            buttons, text="Pausar", command=self._toggle_pause, state="disabled"
+        )
         self.pause_btn.pack(side="left", padx=6)
         self.uptime_var = tk.StringVar(value="")
         ttk.Label(buttons, textvariable=self.uptime_var, style="Muted.TLabel").pack(side="right")
 
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=14, pady=4)
-        self._build_general_tab(notebook)
-        self._build_apps_tab(notebook)
-        self._build_advanced_tab(notebook)
-        self._build_log_tab(notebook)
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=14, pady=4)
+        self._build_general_tab(self.notebook)
+        self._build_apps_tab(self.notebook)
+        self._build_advanced_tab(self.notebook)
+        self._build_log_tab(self.notebook)
 
         graph_frame = ttk.Frame(self, padding=(14, 6, 14, 4))
         graph_frame.pack(fill="x")
         self.canvas = tk.Canvas(graph_frame, height=78, bg=BG_ALT, highlightthickness=0)
         self.canvas.pack(fill="x")
         self.total_var = tk.StringVar(value="")
-        ttk.Label(graph_frame, textvariable=self.total_var, style="Muted.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(graph_frame, textvariable=self.total_var, style="Muted.TLabel").pack(
+            anchor="w", pady=(3, 0)
+        )
 
     # ---------------------------------------------------------------------- tabs
     def _build_general_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook, padding=14)
         notebook.add(tab, text="General")
 
-        ttk.Label(tab, text="Límite global (todo el equipo, sin configurar el router)",
-                  style="Card.TLabel").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        ttk.Label(
+            tab,
+            text="Límite global (todo el equipo, sin configurar el router)",
+            style="Card.TLabel",
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
 
         ttk.Label(tab, text="Descarga").grid(row=1, column=0, sticky="w", pady=4)
         self.down_var = tk.StringVar()
@@ -171,33 +202,45 @@ class LimitadorApp(tk.Tk):
         up_entry.grid(row=2, column=1, sticky="w", pady=4)
 
         self.unit_var = tk.StringVar(value="MB/s")
-        unit_box = ttk.Combobox(tab, textvariable=self.unit_var, values=list(UNITS),
-                                width=7, state="readonly")
+        unit_box = ttk.Combobox(
+            tab, textvariable=self.unit_var, values=list(UNITS), width=7, state="readonly"
+        )
         unit_box.grid(row=1, column=2, rowspan=2, padx=8)
         unit_box.bind("<<ComboboxSelected>>", lambda _e: self._sync_widgets_from_config())
 
-        ttk.Label(tab, text="0 = sin límite", style="Muted.TLabel").grid(row=3, column=0,
-                                                                        columnspan=4, sticky="w")
+        ttk.Label(tab, text="0 = sin límite", style="Muted.TLabel").grid(
+            row=3, column=0, columnspan=4, sticky="w"
+        )
 
         presets = ttk.Frame(tab)
         presets.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 4))
         ttk.Label(presets, text="Rápido:").pack(side="left", padx=(0, 6))
         for value in (1, 5, 10, 25, 50, 100):
-            ttk.Button(presets, text=f"{value} MB/s", width=8,
-                       command=lambda v=value: self._apply_preset(v)).pack(side="left", padx=2)
+            ttk.Button(
+                presets,
+                text=f"{value} MB/s",
+                width=8,
+                command=lambda v=value: self._apply_preset(v),
+            ).pack(side="left", padx=2)
 
         apply_row = ttk.Frame(tab)
         apply_row.grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
-        ttk.Button(apply_row, text="Aplicar límites globales",
-                   command=self._apply_global).pack(side="left")
+        ttk.Button(apply_row, text="Aplicar límites globales", command=self._apply_global).pack(
+            side="left"
+        )
         self.global_hint = tk.StringVar(value="")
-        ttk.Label(apply_row, textvariable=self.global_hint, style="Muted.TLabel").pack(side="left", padx=8)
+        ttk.Label(apply_row, textvariable=self.global_hint, style="Muted.TLabel").pack(
+            side="left", padx=8
+        )
 
         for entry in (down_entry, up_entry):
             entry.bind("<Return>", lambda _e: self._apply_global())
             entry.bind("<FocusOut>", lambda _e: self._apply_global())
-        ttk.Label(tab, text="Los límites se aplican en caliente: no hace falta reiniciar la captura.",
-                  style="Muted.TLabel").grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        ttk.Label(
+            tab,
+            text="Los límites se aplican en caliente: no hace falta reiniciar la captura.",
+            style="Muted.TLabel",
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
     def _build_apps_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook, padding=10)
@@ -206,9 +249,13 @@ class LimitadorApp(tk.Tk):
         columns = ("app", "pid", "down", "up", "limit_down", "limit_up", "state")
         self.apps_tree = ttk.Treeview(tab, columns=columns, show="headings", height=11)
         headings = {
-            "app": ("Aplicación", 190), "pid": ("PID", 55), "down": ("↓ ahora", 80),
-            "up": ("↑ ahora", 80), "limit_down": ("Límite ↓", 80),
-            "limit_up": ("Límite ↑", 80), "state": ("Estado", 90),
+            "app": ("Aplicación", 190),
+            "pid": ("PID", 55),
+            "down": ("↓ ahora", 80),
+            "up": ("↑ ahora", 80),
+            "limit_down": ("Límite ↓", 80),
+            "limit_up": ("Límite ↑", 80),
+            "state": ("Estado", 90),
         }
         for key, (text, width) in headings.items():
             self.apps_tree.heading(key, text=text)
@@ -223,9 +270,24 @@ class LimitadorApp(tk.Tk):
         ttk.Button(row, text="Quitar límite", command=self._remove_limit).pack(side="left", padx=6)
         ttk.Button(row, text="Refrescar ahora", command=self._refresh_apps).pack(side="left")
 
-        ttk.Label(tab, text="La atribución usa los puertos locales de cada proceso "
-                            "(capa de sockets de WinDivert + tabla de conexiones).",
-                  style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+        self.only_active = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            row,
+            text="Solo con tráfico o con regla",
+            variable=self.only_active,
+            command=self._refresh_apps,
+        ).pack(side="right")
+        self.apps_count_var = tk.StringVar(value="")
+        ttk.Label(row, textvariable=self.apps_count_var, style="Muted.TLabel").pack(
+            side="right", padx=8
+        )
+
+        ttk.Label(
+            tab,
+            text="La atribución usa los puertos locales de cada proceso "
+            "(capa de sockets de WinDivert + tabla de conexiones).",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(6, 0))
 
     def _build_advanced_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook, padding=14)
@@ -233,14 +295,24 @@ class LimitadorApp(tk.Tk):
 
         ttk.Label(tab, text="Presupuesto de retardo (ms)").grid(row=0, column=0, sticky="w", pady=4)
         self.delay_var = tk.StringVar()
-        delay = ttk.Spinbox(tab, from_=5, to=500, increment=5, width=6,
-                            textvariable=self.delay_var, command=self._apply_advanced)
+        delay = ttk.Spinbox(
+            tab,
+            from_=5,
+            to=500,
+            increment=5,
+            width=6,
+            textvariable=self.delay_var,
+            command=self._apply_advanced,
+        )
         delay.grid(row=0, column=1, sticky="w")
         delay.bind("<FocusOut>", lambda _e: self._apply_advanced())
-        ttk.Label(tab, text="Cuánto puede retener un paquete como máximo. Define también la ráfaga\n"
-                            "(burst = tasa × retardo). Más bajo = menos bufferbloat, más descartes.",
-                  style="Muted.TLabel", justify="left").grid(row=1, column=0, columnspan=3,
-                                                             sticky="w", pady=(0, 10))
+        ttk.Label(
+            tab,
+            text="Cuánto puede retener un paquete como máximo. Define también la ráfaga\n"
+            "(burst = tasa × retardo). Más bajo = menos bufferbloat, más descartes.",
+            style="Muted.TLabel",
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         self.control_var = tk.BooleanVar()
         self.lan_var = tk.BooleanVar()
@@ -249,52 +321,78 @@ class LimitadorApp(tk.Tk):
         self.autostart_var = tk.BooleanVar()
         self.autostart_on_launch_var = tk.BooleanVar()
         options = [
-            (self.control_var, "No limitar tráfico de control (ACK, DNS, ICMP)",
-             "Recomendado: retardar los ACK multiplica la latencia sin controlar la tasa."),
-            (self.lan_var, "Excluir la red local del límite",
-             "Tráfico a 10.x / 172.16-31.x / 192.168.x, multicast y broadcast no se limita."),
-            (self.ipv6_var, "Limitar también IPv6",
-             "Si lo desactivas, solo se limita IPv4."),
-            (self.tray_var, "Cerrar a la bandeja del sistema",
-             "Cerrar la ventana deja el limitador activo, con icono en la bandeja."),
-            (self.autostart_var, "Iniciar con Windows (tarea programada, sin UAC al arrancar)",
-             f"Estado actual: {autostart.status_text()}"),
+            (
+                self.control_var,
+                "No limitar tráfico de control (ACK, DNS, ICMP)",
+                "Recomendado: retardar los ACK multiplica la latencia sin controlar la tasa.",
+            ),
+            (
+                self.lan_var,
+                "Excluir la red local del límite",
+                "Tráfico a 10.x / 172.16-31.x / 192.168.x, multicast y broadcast no se limita.",
+            ),
+            (self.ipv6_var, "Limitar también IPv6", "Si lo desactivas, solo se limita IPv4."),
+            (
+                self.tray_var,
+                "Cerrar a la bandeja del sistema",
+                "Cerrar la ventana deja el limitador activo, con icono en la bandeja.",
+            ),
+            (
+                self.autostart_var,
+                "Iniciar con Windows (tarea programada, sin UAC al arrancar)",
+                f"Estado actual: {autostart.status_text()}",
+            ),
             (self.autostart_on_launch_var, "Empezar a limitar al abrir la aplicación", ""),
         ]
         row = 2
         for var, text, hint in options:
-            ttk.Checkbutton(tab, text=text, variable=var,
-                            command=self._apply_advanced).grid(row=row, column=0, columnspan=3,
-                                                              sticky="w", pady=(4, 0))
+            ttk.Checkbutton(tab, text=text, variable=var, command=self._apply_advanced).grid(
+                row=row, column=0, columnspan=3, sticky="w", pady=(4, 0)
+            )
             row += 1
             if hint:
                 ttk.Label(tab, text=hint, style="Muted.TLabel", justify="left").grid(
-                    row=row, column=0, columnspan=3, sticky="w", padx=(22, 0))
+                    row=row, column=0, columnspan=3, sticky="w", padx=(22, 0)
+                )
                 row += 1
 
         ttk.Separator(tab).grid(row=row, column=0, columnspan=3, sticky="ew", pady=10)
         row += 1
         self.stats_var = tk.StringVar(value="")
-        ttk.Label(tab, textvariable=self.stats_var, justify="left",
-                  style="Muted.TLabel").grid(row=row, column=0, columnspan=3, sticky="w")
+        ttk.Label(tab, textvariable=self.stats_var, justify="left", style="Muted.TLabel").grid(
+            row=row, column=0, columnspan=3, sticky="w"
+        )
         row += 1
         actions = ttk.Frame(tab)
         actions.grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        ttk.Button(actions, text="Reiniciar contadores", command=self._reset_counters).pack(side="left")
-        ttk.Button(actions, text="Diagnóstico", command=self._show_diagnostics).pack(side="left", padx=6)
+        ttk.Button(actions, text="Reiniciar contadores", command=self._reset_counters).pack(
+            side="left"
+        )
+        ttk.Button(actions, text="Diagnóstico", command=self._show_diagnostics).pack(
+            side="left", padx=6
+        )
         ttk.Button(actions, text="Reparar driver", command=self._repair_driver).pack(side="left")
 
     def _build_log_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook, padding=10)
         notebook.add(tab, text="Registro")
-        self.log_text = tk.Text(tab, height=14, bg=BG_ALT, fg=FG, insertbackground=FG,
-                                relief="flat", font=("Consolas", 8), wrap="none")
+        self.log_text = tk.Text(
+            tab,
+            height=14,
+            bg=BG_ALT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+            font=("Consolas", 8),
+            wrap="none",
+        )
         self.log_text.pack(fill="both", expand=True)
         self.log_text.configure(state="disabled")
         row = ttk.Frame(tab, padding=(0, 6, 0, 0))
         row.pack(fill="x")
-        ttk.Button(row, text="Abrir carpeta de configuración",
-                   command=self._open_config_dir).pack(side="left")
+        ttk.Button(row, text="Abrir carpeta de configuración", command=self._open_config_dir).pack(
+            side="left"
+        )
         ttk.Label(row, text=f"Log: {log_path()}", style="Muted.TLabel").pack(side="left", padx=8)
 
     # --------------------------------------------------------------------- state
@@ -313,8 +411,12 @@ class LimitadorApp(tk.Tk):
 
     def _apply_global(self) -> None:
         try:
-            self.config_data.settings.global_down_bps = parse_rate(self.down_var.get(), self.unit_var.get())
-            self.config_data.settings.global_up_bps = parse_rate(self.up_var.get(), self.unit_var.get())
+            self.config_data.settings.global_down_bps = parse_rate(
+                self.down_var.get(), self.unit_var.get()
+            )
+            self.config_data.settings.global_up_bps = parse_rate(
+                self.up_var.get(), self.unit_var.get()
+            )
         except ValueError as exc:
             messagebox.showerror("Límite inválido", str(exc), parent=self)
             self._sync_widgets_from_config()
@@ -322,8 +424,10 @@ class LimitadorApp(tk.Tk):
         self._commit_settings()
         settings = self.config_data.settings
         if settings.has_global_limit:
-            self.global_hint.set(f"↓ {format_rate(settings.global_down_bps)} · "
-                                 f"↑ {format_rate(settings.global_up_bps)}")
+            self.global_hint.set(
+                f"↓ {format_rate(settings.global_down_bps)} · "
+                f"↑ {format_rate(settings.global_up_bps)}"
+            )
         else:
             self.global_hint.set("sin límite global")
 
@@ -417,8 +521,9 @@ class LimitadorApp(tk.Tk):
         running = self.engine.is_running
         paused = self.engine.is_paused
         self.toggle_btn.config(text="Detener" if running else "Iniciar limitación")
-        self.pause_btn.config(state="normal" if running else "disabled",
-                              text="Reanudar" if paused else "Pausar")
+        self.pause_btn.config(
+            state="normal" if running else "disabled", text="Reanudar" if paused else "Pausar"
+        )
         if not running:
             self.status_var.set("Detenido")
         elif paused:
@@ -470,10 +575,15 @@ class LimitadorApp(tk.Tk):
             f"↓ {format_bytes(snapshot.bytes_down)} · ↑ {format_bytes(snapshot.bytes_up)} · "
             f"descartado {format_bytes(snapshot.dropped_down + snapshot.dropped_up)} "
             f"({snapshot.dropped_packets} paq.)"
-            + (f" · cola {format_bytes(snapshot.queued_down + snapshot.queued_up)}"
-               if snapshot.queued_down + snapshot.queued_up else "")
+            + (
+                f" · cola {format_bytes(snapshot.queued_down + snapshot.queued_up)}"
+                if snapshot.queued_down + snapshot.queued_up
+                else ""
+            )
         )
-        self.uptime_var.set(f"activo {format_duration(snapshot.uptime)}" if snapshot.running else "")
+        self.uptime_var.set(
+            f"activo {format_duration(snapshot.uptime)}" if snapshot.running else ""
+        )
         self.stats_var.set(
             f"Puertos identificados: {snapshot.port_entries} · "
             f"capa de sockets: {'activa' if snapshot.socket_events_ok else 'no disponible'}\n"
@@ -518,26 +628,42 @@ class LimitadorApp(tk.Tk):
             if rule:
                 matched_rules.add(self.config_data.normalise_exe(rule.exe))
             state = "limitada" if (rule and rule.has_limit) else ("regla inactiva" if rule else "")
-            item = self.apps_tree.insert("", "end", values=(
-                name[:44], pid if pid else "—",
-                format_rate(down) if down else "—",
-                format_rate(up) if up else "—",
-                format_rate(rule.down_bps) if rule and rule.down_bps else "—",
-                format_rate(rule.up_bps) if rule and rule.up_bps else "—",
-                state,
-            ), tags=("limited",) if state == "limitada" else ())
+            item = self.apps_tree.insert(
+                "",
+                "end",
+                values=(
+                    name[:44],
+                    pid if pid else "—",
+                    format_rate(down) if down else "—",
+                    format_rate(up) if up else "—",
+                    format_rate(rule.down_bps) if rule and rule.down_bps else "—",
+                    format_rate(rule.up_bps) if rule and rule.up_bps else "—",
+                    state,
+                ),
+                tags=("limited",) if state == "limitada" else (),
+            )
             self._app_rows[item] = pid
 
+        only_active = bool(self.only_active.get())
+        shown = 0
         for pid in sorted(pids, key=lambda p: -(self._rate_cache.get(p, (0, 0))[0])):
+            if pid in SYSTEM_PIDS:
+                continue  # Idle y System: no son aplicaciones limitables
             exe = self.pmap.path_for(pid)
             down, up = self._rate_cache.get(pid, (0.0, 0.0))
+            rule_here = rules_by_exe.get(self.config_data.normalise_exe(exe or ""))
+            if only_active and not down and not up and rule_here is None:
+                continue
             add_row(pid, self.pmap.name_for(pid), exe, down, up)
+            shown += 1
 
-        for rule in self.config_data.rules:      # rules for apps that are not running now
+        for rule in self.config_data.rules:  # rules for apps that are not running now
             key = self.config_data.normalise_exe(rule.exe)
             if key not in matched_rules:
                 add_row(None, f"{rule.display_name} (sin conexiones)", rule.exe, 0.0, 0.0)
+                shown += 1
 
+        self.apps_count_var.set(f"{shown} aplicación{'es' if shown != 1 else ''}")
         self.apps_tree.tag_configure("limited", foreground=ACCENT)
         if selected is not None:
             for item, pid in self._app_rows.items():
@@ -562,9 +688,11 @@ class LimitadorApp(tk.Tk):
             rule = next((r for r in self.config_data.rules if r.display_name == name), None)
             exe = rule.exe if rule else None
         if not exe:
-            messagebox.showinfo("Aplicaciones",
-                                "No se pudo determinar el ejecutable de esta aplicación.",
-                                parent=self)
+            messagebox.showinfo(
+                "Aplicaciones",
+                "No se pudo determinar el ejecutable de esta aplicación.",
+                parent=self,
+            )
             return
         name = self.pmap.name_for(pid) if pid else Path(exe).name
         existing = self.config_data.rule_for_exe(exe)
@@ -586,15 +714,21 @@ class LimitadorApp(tk.Tk):
         unit = "MB/s"
         ttk.Label(form, text="Descarga").grid(row=0, column=0, sticky="w", pady=4)
         down_var = tk.StringVar(value=to_display(existing.down_bps, unit) if existing else "")
-        ttk.Entry(form, textvariable=down_var, width=10, justify="right").grid(row=0, column=1, sticky="w")
+        ttk.Entry(form, textvariable=down_var, width=10, justify="right").grid(
+            row=0, column=1, sticky="w"
+        )
         ttk.Label(form, text="Subida").grid(row=1, column=0, sticky="w", pady=4)
         up_var = tk.StringVar(value=to_display(existing.up_bps, unit) if existing else "")
-        ttk.Entry(form, textvariable=up_var, width=10, justify="right").grid(row=1, column=1, sticky="w")
+        ttk.Entry(form, textvariable=up_var, width=10, justify="right").grid(
+            row=1, column=1, sticky="w"
+        )
         unit_var = tk.StringVar(value=unit)
-        ttk.Combobox(form, textvariable=unit_var, values=list(UNITS), width=7,
-                     state="readonly").grid(row=0, column=2, rowspan=2, padx=8)
-        ttk.Label(form, text="0 o vacío = sin límite en esa dirección",
-                  style="Muted.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Combobox(
+            form, textvariable=unit_var, values=list(UNITS), width=7, state="readonly"
+        ).grid(row=0, column=2, rowspan=2, padx=8)
+        ttk.Label(form, text="0 o vacío = sin límite en esa dirección", style="Muted.TLabel").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(6, 0)
+        )
 
         def save() -> None:
             try:
@@ -610,19 +744,21 @@ class LimitadorApp(tk.Tk):
             self._commit_settings()
             self.engine.apply_config()
             logging.getLogger("limitador").info(
-                "límite por aplicación: %s ↓%s ↑%s", name,
-                format_rate(down), format_rate(up))
+                "límite por aplicación: %s ↓%s ↑%s", name, format_rate(down), format_rate(up)
+            )
             dialog.destroy()
 
         actions = ttk.Frame(dialog, padding=(14, 0, 14, 12))
         actions.pack(fill="x")
         ttk.Button(actions, text="Guardar", command=save).pack(side="right")
         if existing:
+
             def remove() -> None:
                 self.config_data.remove_rule(exe)
                 self._commit_settings()
                 logging.getLogger("limitador").info("límite eliminado: %s", name)
                 dialog.destroy()
+
             ttk.Button(actions, text="Quitar límite", command=remove).pack(side="right", padx=6)
         ttk.Button(actions, text="Cancelar", command=dialog.destroy).pack(side="right")
 
@@ -647,18 +783,33 @@ class LimitadorApp(tk.Tk):
         settings = self.config_data.settings
         history = self._history
         peak = max(
-            [max(history["down"], default=0.0), max(history["up"], default=0.0),
-             settings.global_down_bps, settings.global_up_bps, 1024.0]
+            [
+                max(history["down"], default=0.0),
+                max(history["up"], default=0.0),
+                settings.global_down_bps,
+                settings.global_up_bps,
+                1024.0,
+            ]
         )
         for fraction in (0.5, 1.0):
             y = height - fraction * height
             canvas.create_line(0, y, width, y, fill="#333333")
-        canvas.create_text(4, 8, anchor="w", fill=ACCENT,
-                           text=f"↓ {format_rate(history['down'][-1] if history['down'] else 0)}",
-                           font=("Consolas", 8))
-        canvas.create_text(4, 20, anchor="w", fill=ACCENT_WARM,
-                           text=f"↑ {format_rate(history['up'][-1] if history['up'] else 0)}",
-                           font=("Consolas", 8))
+        canvas.create_text(
+            4,
+            8,
+            anchor="w",
+            fill=ACCENT,
+            text=f"↓ {format_rate(history['down'][-1] if history['down'] else 0)}",
+            font=("Consolas", 8),
+        )
+        canvas.create_text(
+            4,
+            20,
+            anchor="w",
+            fill=ACCENT_WARM,
+            text=f"↑ {format_rate(history['up'][-1] if history['up'] else 0)}",
+            font=("Consolas", 8),
+        )
         for key, color in (("down", ACCENT), ("up", ACCENT_WARM)):
             values = list(history[key])
             if len(values) < 2:
@@ -670,7 +821,8 @@ class LimitadorApp(tk.Tk):
                 points.extend((index * step, y))
             canvas.create_line(*points, fill=color, width=1.4)
         if settings.has_global_limit:
-            for rate, color in ((settings.global_down_bps, ACCENT), (settings.global_up_bps, ACCENT_WARM)):
+            limits = ((settings.global_down_bps, ACCENT), (settings.global_up_bps, ACCENT_WARM))
+            for rate, color in limits:
                 if rate > 0:
                     y = height - (rate / peak) * (height - 6) - 3
                     canvas.create_line(0, y, width, y, fill=color, dash=(3, 3))
@@ -689,31 +841,47 @@ class LimitadorApp(tk.Tk):
         window.title(title)
         window.configure(bg=BG)
         window.geometry("640x460")
-        text = tk.Text(window, bg=BG_ALT, fg=FG, insertbackground=FG, wrap="word",
-                       font=("Consolas", 8), relief="flat")
+        text = tk.Text(
+            window,
+            bg=BG_ALT,
+            fg=FG,
+            insertbackground=FG,
+            wrap="word",
+            font=("Consolas", 8),
+            relief="flat",
+        )
         text.pack(fill="both", expand=True, padx=10, pady=(10, 4))
         text.insert("1.0", content)
         row = ttk.Frame(window, padding=(10, 0, 10, 10))
         row.pack(fill="x")
-        ttk.Button(row, text="Copiar al portapapeles",
-                   command=lambda: (self.clipboard_clear(), self.clipboard_append(content))).pack(side="right")
+
+        def copy_to_clipboard() -> None:
+            self.clipboard_clear()
+            self.clipboard_append(content)
+
+        ttk.Button(row, text="Copiar al portapapeles", command=copy_to_clipboard).pack(side="right")
         ttk.Button(row, text="Cerrar", command=window.destroy).pack(side="right", padx=6)
 
     def _repair_driver(self) -> None:
         if not driver.is_admin():
-            messagebox.showwarning("Reparar driver",
-                                   "Necesitas ejecutar Limitador como administrador.", parent=self)
+            messagebox.showwarning(
+                "Reparar driver", "Necesitas ejecutar Limitador como administrador.", parent=self
+            )
             return
         self.status_var.set("Reparando driver…")
         self.update_idletasks()
 
         def work() -> None:
             ok, detail = driver.install(force_reinstall=True)
-            self.events.put(EngineEvent(
-                "info" if ok else "error",
-                f"Reparación del driver: {detail}"))
-            self.after(0, lambda: messagebox.showinfo(
-                "Reparar driver", f"{'Correcto' if ok else 'Fallo'}: {detail}", parent=self))
+            self.events.put(
+                EngineEvent("info" if ok else "error", f"Reparación del driver: {detail}")
+            )
+            self.after(
+                0,
+                lambda: messagebox.showinfo(
+                    "Reparar driver", f"{'Correcto' if ok else 'Fallo'}: {detail}", parent=self
+                ),
+            )
             self.after(0, self._refresh_state)
 
         threading.Thread(target=work, name="repair-driver", daemon=True).start()
@@ -721,24 +889,28 @@ class LimitadorApp(tk.Tk):
     def _open_config_dir(self) -> None:
         target = log_path().parent
         target.mkdir(parents=True, exist_ok=True)
-        import os
-        os.startfile(str(target))  # noqa: S606 - opening our own folder
+        os.startfile(str(target))
 
     # --------------------------------------------------------------------- tray
     def _start_tray(self) -> None:
         if not self.config_data.settings.minimize_to_tray:
             return
         try:
-            import pystray
-            from PIL import Image
+            # Import perezoso a propósito: pystray/Pillow son opcionales, y si faltan la
+            # aplicación funciona igual sin icono de bandeja.
+            import pystray  # noqa: PLC0415
+            from PIL import Image  # noqa: PLC0415
         except ImportError:
-            logging.getLogger("limitador").info("pystray/Pillow no instalados: sin icono de bandeja")
+            logging.getLogger("limitador").info(
+                "pystray/Pillow no instalados: sin icono de bandeja"
+            )
             return
         icon_path = Path(__file__).resolve().parent.parent / "Limitador.ico"
+        blank = Image.new("RGBA", (64, 64), (30, 30, 30, 255))
         try:
-            image = Image.open(icon_path) if icon_path.exists() else Image.new("RGBA", (64, 64), (30, 30, 30, 255))
+            image = Image.open(icon_path) if icon_path.exists() else blank
         except Exception:
-            image = Image.new("RGBA", (64, 64), (30, 30, 30, 255))
+            image = blank
 
         def show(_icon=None, _item=None) -> None:
             self.after(0, self._show_window)
@@ -780,12 +952,8 @@ class LimitadorApp(tk.Tk):
             self.engine.stop()
         finally:
             if self._tray is not None:
-                try:
+                with suppress(Exception):
                     self._tray.stop()
-                except Exception:
-                    pass
-            try:
+            with suppress(OSError):
                 self.config_data.save()
-            except OSError:
-                pass
             self.destroy()

@@ -1,4 +1,5 @@
 """Ensures the repository root is importable when running ``pytest``."""
+
 import sys
 from pathlib import Path
 

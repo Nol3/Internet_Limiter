@@ -11,6 +11,7 @@ We copy both files to a stable per-machine directory and point pydivert at that 
 *before* the first handle is opened, and we remove stale service registrations left over
 from an older temp directory.
 """
+
 from __future__ import annotations
 
 import ctypes
@@ -21,15 +22,22 @@ import subprocess
 import sys
 import winreg
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+
+from pydivert import WinDivert, windivert_dll
+from pydivert import __version__ as pydivert_version
+
+from .filters import build_network_filter, validate_filter
+from .rules import APP_VERSION
 
 SERVICE_NAME = "WinDivert"
 DRIVER_FILES = ("WinDivert64.dll", "WinDivert64.sys")
 CREATE_NO_WINDOW = 0x08000000
 SERVICE_KEY = rf"SYSTEM\CurrentControlSet\Services\{SERVICE_NAME}"
 
-_prepared = False
-_driver_dir: Path | None = None
+#: Estado del módulo en un dict: se muta sin reasignar el nombre (sin ``global``).
+_state: dict[str, bool] = {"prepared": False}
 
 
 # --------------------------------------------------------------------------- admin
@@ -42,16 +50,12 @@ def is_admin() -> bool:
 
 # ------------------------------------------------------------------------- locations
 def _pydivert_driver_dir() -> Path:
-    from pydivert import windivert_dll
-
     return Path(windivert_dll.__file__).parent
 
 
-def stable_driver_dir() -> Path:
-    """Where the driver is kept permanently (survives temp cleanup/reboots)."""
-    global _driver_dir
-    if _driver_dir is not None:
-        return _driver_dir
+@lru_cache(maxsize=1)
+def _stable_driver_dir() -> Path:
+    """Primera ubicación disponible, calculada una sola vez por proceso."""
     candidates = []
     program_data = os.environ.get("ProgramData")
     if program_data:
@@ -60,8 +64,12 @@ def stable_driver_dir() -> Path:
     if local:
         candidates.append(Path(local) / "Limitador" / "driver")
     candidates.append(_pydivert_driver_dir())
-    _driver_dir = candidates[0]
-    return _driver_dir
+    return candidates[0]
+
+
+def stable_driver_dir() -> Path:
+    """Where the driver is kept permanently (survives temp cleanup/reboots)."""
+    return _stable_driver_dir()
 
 
 def _sha256(path: Path) -> str:
@@ -71,8 +79,6 @@ def _sha256(path: Path) -> str:
 
 
 def bundled_driver_version() -> str:
-    from pydivert import __version__ as pydivert_version
-
     return f"pydivert {pydivert_version}"
 
 
@@ -83,8 +89,6 @@ def patch_dll_path(directory: Path) -> bool:
     Must run before the first WinDivert call, because pydivert caches the DLL handle
     on first use.
     """
-    from pydivert import windivert_dll
-
     dll = directory / "WinDivert64.dll"
     if not dll.exists():
         return False
@@ -130,14 +134,20 @@ def _secure_driver_dir(directory: Path) -> tuple[bool, str]:
     if not is_admin():
         return False, "sin privilegios: no se pudo restringir el directorio del driver"
     command = [
-        "icacls.exe", str(directory), "/inheritance:r",
-        "/grant:r", "*S-1-5-18:(OI)(CI)F",      # SYSTEM
-        "/grant:r", "*S-1-5-32-544:(OI)(CI)F",  # Administrators
-        "/grant:r", "*S-1-5-32-545:(OI)(CI)RX", # Users: read/execute only
+        "icacls.exe",
+        str(directory),
+        "/inheritance:r",
+        "/grant:r",
+        "*S-1-5-18:(OI)(CI)F",  # SYSTEM
+        "/grant:r",
+        "*S-1-5-32-544:(OI)(CI)F",  # Administrators
+        "/grant:r",
+        "*S-1-5-32-545:(OI)(CI)RX",  # Users: read/execute only
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True,
-                                creationflags=CREATE_NO_WINDOW)
+        result = subprocess.run(
+            command, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW
+        )
     except OSError as exc:  # pragma: no cover
         return False, f"icacls no disponible: {exc}"
     if result.returncode != 0:
@@ -147,16 +157,15 @@ def _secure_driver_dir(directory: Path) -> tuple[bool, str]:
 
 def prepare() -> tuple[bool, str]:
     """Idempotent startup step: stable driver files + DLL_PATH patched."""
-    global _prepared
-    if _prepared:
+    if _state["prepared"]:
         return True, "ya preparado"
     ok, detail = ensure_driver_files()
     if not ok:
         patch_dll_path(_pydivert_driver_dir())
     elif is_admin():
-        secured, message = _secure_driver_dir(stable_driver_dir())
+        _secured, message = _secure_driver_dir(stable_driver_dir())
         detail += f" · {message}"
-    _prepared = True
+    _state["prepared"] = True
     return ok, detail
 
 
@@ -170,10 +179,12 @@ def service_image_path() -> str | None:
         return None
     if not isinstance(value, str):
         return None
-    expanded = os.path.expandvars(value.replace("%SystemRoot%", os.environ.get("SystemRoot", r"C:\Windows")))
+    expanded = os.path.expandvars(
+        value.replace("%SystemRoot%", os.environ.get("SystemRoot", r"C:\Windows"))
+    )
     for prefix in ("\\??\\", "\\SystemRoot\\"):
         if expanded.startswith(prefix):
-            expanded = expanded[len(prefix):]
+            expanded = expanded[len(prefix) :]
     return expanded
 
 
@@ -186,7 +197,9 @@ def service_state() -> str:
     try:
         result = subprocess.run(
             ["sc.exe", "query", SERVICE_NAME],
-            capture_output=True, text=True, creationflags=CREATE_NO_WINDOW,
+            capture_output=True,
+            text=True,
+            creationflags=CREATE_NO_WINDOW,
         )
     except OSError:  # pragma: no cover
         return "missing"
@@ -206,7 +219,9 @@ def stop_and_delete_service() -> tuple[bool, str]:
     for args in (["stop", SERVICE_NAME], ["delete", SERVICE_NAME]):
         try:
             result = subprocess.run(
-                ["sc.exe", *args], capture_output=True, text=True,
+                ["sc.exe", *args],
+                capture_output=True,
+                text=True,
                 creationflags=CREATE_NO_WINDOW,
             )
             messages.append(f"sc {' '.join(args)}: rc={result.returncode}")
@@ -225,8 +240,6 @@ def is_stale_service() -> bool:
 
 def load_test() -> tuple[bool, str]:
     """Try to open a throwaway handle: this is what actually installs the driver."""
-    from pydivert import WinDivert
-
     try:
         with WinDivert("false"):
             pass
@@ -292,6 +305,7 @@ def windows_version() -> str:
             winreg.HKEY_LOCAL_MACHINE,
             r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
         ) as key:
+
             def value(name: str) -> str:
                 try:
                     return str(winreg.QueryValueEx(key, name)[0])
@@ -309,33 +323,48 @@ def windows_version() -> str:
 
 def preflight(*, check_limits: bool = True) -> list[Check]:
     """Everything that must hold before the engine can limit traffic."""
-    from .filters import build_network_filter, validate_filter
-
     checks: list[Check] = []
 
     admin = is_admin()
-    checks.append(Check("Privilegios de administrador", admin,
-                        "elevado" if admin else "proceso sin elevar",
-                        "El limitador necesita el driver kernel: ejecútalo como administrador."))
+    checks.append(
+        Check(
+            "Privilegios de administrador",
+            admin,
+            "elevado" if admin else "proceso sin elevar",
+            "El limitador necesita el driver kernel: ejecútalo como administrador.",
+        )
+    )
 
     driver_dir = stable_driver_dir()
     have_files = all((driver_dir / name).exists() for name in DRIVER_FILES)
-    checks.append(Check("Archivos del driver", have_files,
-                        f"{driver_dir}",
-                        "Ejecuta la reparación: copia WinDivert64.dll y WinDivert64.sys "
-                        "a la carpeta del driver."))
+    checks.append(
+        Check(
+            "Archivos del driver",
+            have_files,
+            f"{driver_dir}",
+            "Ejecuta la reparación: copia WinDivert64.dll y WinDivert64.sys "
+            "a la carpeta del driver.",
+        )
+    )
 
     if admin:
         state = service_state()
         image = service_image_path() or "(no registrado)"
         stale = is_stale_service()
-        checks.append(Check(
-            "Servicio del driver", not stale, f"servicio {SERVICE_NAME}: {state} · {image}",
-            "El servicio apunta a una ruta que ya no existe: pulsa 'Reparar driver'.",
-        ))
+        checks.append(
+            Check(
+                "Servicio del driver",
+                not stale,
+                f"servicio {SERVICE_NAME}: {state} · {image}",
+                "El servicio apunta a una ruta que ya no existe: pulsa 'Reparar driver'.",
+            )
+        )
     else:
-        checks.append(Check("Servicio del driver", True, "no comprobado (sin privilegios)",
-                            "", critical=False))
+        checks.append(
+            Check(
+                "Servicio del driver", True, "no comprobado (sin privilegios)", "", critical=False
+            )
+        )
 
     filters_ok = True
     detail_parts = []
@@ -344,23 +373,35 @@ def preflight(*, check_limits: bool = True) -> list[Check]:
         ok, msg = validate_filter(filt)
         filters_ok = filters_ok and ok
         detail_parts.append(f"{direction}: {'ok' if ok else msg}")
-    checks.append(Check("Filtros de captura", filters_ok, " · ".join(detail_parts),
-                        "Fallo de programación: revisa limitador/filters.py"))
+    checks.append(
+        Check(
+            "Filtros de captura",
+            filters_ok,
+            " · ".join(detail_parts),
+            "Fallo de programación: revisa limitador/filters.py",
+        )
+    )
 
     hvci = _hvci_enabled()
     if hvci:
-        checks.append(Check(
-            "Integridad de memoria (HVCI)", True,
-            "activada (WinDivert 2.2.2 es compatible)",
-            "", critical=False,
-        ))
+        checks.append(
+            Check(
+                "Integridad de memoria (HVCI)",
+                True,
+                "activada (WinDivert 2.2.2 es compatible)",
+                "",
+                critical=False,
+            )
+        )
 
     if check_limits:
-        from .engine import engine_available
+        # Import perezoso a propósito: engine importa este módulo (ciclo).
+        from .engine import engine_available  # noqa: PLC0415
 
         ok, detail = engine_available()
-        checks.append(Check("Motor de captura", ok, detail,
-                            "Instala/repara el driver o reinicia el equipo."))
+        checks.append(
+            Check("Motor de captura", ok, detail, "Instala/repara el driver o reinicia el equipo.")
+        )
     return checks
 
 
@@ -370,8 +411,6 @@ def all_ok(checks: list[Check]) -> bool:
 
 def diagnose() -> str:
     """Plain-text report to paste into a bug report."""
-    from .rules import APP_VERSION
-
     lines = [
         f"Limitador {APP_VERSION} - diagnóstico",
         f"Windows: {windows_version()} ({sys.getwindowsversion().platform_str if hasattr(sys.getwindowsversion(), 'platform_str') else ''})",
@@ -383,8 +422,10 @@ def diagnose() -> str:
     ]
     for name in DRIVER_FILES:
         path = stable_driver_dir() / name
-        lines.append(f"  {name}: {'sí' if path.exists() else 'NO'}"
-                     + (f" sha256:{_sha256(path)}" if path.exists() else ""))
+        lines.append(
+            f"  {name}: {'sí' if path.exists() else 'NO'}"
+            + (f" sha256:{_sha256(path)}" if path.exists() else "")
+        )
     lines.append(f"Servicio: estado={service_state()} imagen={service_image_path()}")
     lines.append(f"Servicio obsoleto: {is_stale_service()}")
     lines.append("")

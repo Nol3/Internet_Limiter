@@ -6,6 +6,7 @@ of microseconds and the achieved rate collapses to a fraction of the configured 
 
     .venv\\Scripts\\python.exe tools\\pacing_check.py
 """
+
 from __future__ import annotations
 
 import sys
@@ -14,8 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from limitador.console import ensure_utf8_console  # noqa: E402
-from limitador.shaper import Shaper  # noqa: E402
+from limitador.console import ensure_utf8_console
+from limitador.shaper import Shaper
 
 MB = 1024 * 1024
 

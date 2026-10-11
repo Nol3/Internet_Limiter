@@ -1,4 +1,5 @@
 """Rate/size parsing and formatting helpers (single source of truth for the UI)."""
+
 from __future__ import annotations
 
 MB = 1024 * 1024
@@ -45,7 +46,7 @@ def format_rate(bps: float, unit: str | None = None) -> str:
 
 
 def format_bytes(n: float) -> str:
-    for unit, div in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+    for unit, div in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
         if abs(n) >= div:
             return f"{n / div:.2f} {unit}"
     return f"{n:.0f} B"

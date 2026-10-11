@@ -1,0 +1,50 @@
+# Configuración de herramientas (no es un paquete instalable: Limitador es una aplicación).
+#
+#   .venv\Scripts\python.exe -m ruff check .        # análisis estático
+#   .venv\Scripts\python.exe -m ruff check . --fix  # arreglos seguros
+#   .venv\Scripts\python.exe -m pytest tests -q     # pruebas
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["build", "dist", ".venv", "installer_output"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PL", "ARG"]
+ignore = [
+    # El formateador (ruff format) ya controla la longitud; las líneas que quedan largas son
+    # cadenas y docstrings que no se pueden partir sin empeorar la lectura.
+    "E501",
+    # Los signos ×, – y similares son correctos en los textos en español de este proyecto.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # Los nombres de las variables de entorno de Windows no distinguen mayúsculas y los
+    # documentados son ProgramData/SystemRoot; se usan tal cual.
+    "SIM112",
+    # El camino por paquete NO puede lanzar excepciones: capturar Exception y no hacer nada
+    # es una decisión de diseño (fail-open), no un descuido. Ver docs/ARQUITECTURA.md §6.
+    "BLE001",
+    "S110",
+    # Se inspecciona returncode a mano en todas las llamadas a sc.exe/schtasks/icacls.
+    "PLW1510",
+    # Complejidad: el bucle del motor y la interfaz son largos por naturaleza.
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Los scripts de tools/ y el punto de entrada tocan sys.path antes de importar.
+"main.py" = ["E402"]
+"tools/*" = ["E402", "T201", "S603", "S607", "PLR2004"]
+"tests/*" = ["S101", "PLR2004", "ARG001", "ARG002", "ARG005"]
+# La interfaz define widgets y textos largos: valores literales de layout y umbrales.
+"limitador/gui.py" = ["ARG002", "PLW0603", "PLR2004", "SIM105"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["limitador"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

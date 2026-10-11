@@ -58,10 +58,13 @@ Name: "desktopicon"; Description: "Crear icono en el Escritorio"; GroupDescripti
 Name: "autostart"; Description: "Iniciar Limitador automaticamente con Windows (sin aviso de UAC)"; GroupDescription: "Opciones de inicio:"; Flags: unchecked
 
 [Dirs]
-; Carpeta estable del driver: escribible solo por administradores (el instalador corre
-; elevado). La app vuelve a asegurar los permisos con icacls en cada arranque.
-Name: "{commonappdata}\{#MyAppName}"; Permissions: users-read
-Name: "{commonappdata}\{#MyAppName}\driver"; Permissions: users-read
+; Carpeta estable del driver. Inno Setup solo admite 'full' o 'modify' en Permissions, y
+; 'modify' daria permiso de escritura a los usuarios normales: justo lo que NO queremos
+; (podrian reemplazar el driver que carga el servicio elevado). Los permisos correctos los
+; fija la propia aplicacion en cada arranque con icacls: SYSTEM y Administradores con control
+; total, Usuarios solo lectura y ejecucion (ver limitador/driver.py, _secure_driver_dir).
+Name: "{commonappdata}\{#MyAppName}"
+Name: "{commonappdata}\{#MyAppName}\driver"
 
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -92,7 +95,9 @@ Filename: "{sys}\sc.exe"; Parameters: "delete WinDivert"; Flags: runhidden; RunO
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
 Type: filesandordirs; Name: "{commonappdata}\{#MyAppName}\driver"
-Type: files; Name: "{userappdata}\{#MyAppName}\config.json"
+; Los ajustes del usuario (%APPDATA%\Limitador\config.json) NO se borran a proposito: son
+; datos suyos y asi los conserva si vuelve a instalar. Ademas, borrarlos desde aqui solo
+; funcionaria para la cuenta que ejecuta el desinstalador.
 
 [Code]
 { ------------------------------------------------------------------ }
