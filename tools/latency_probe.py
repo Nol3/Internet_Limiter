@@ -35,7 +35,7 @@ if str(ROOT) not in sys.path:
 
 from limitador import driver
 from limitador.console import ensure_utf8_console
-from limitador.engine import SPLIT_HANDLES_ENV, Engine
+from limitador.engine import Engine
 from limitador.latency import LatencyMonitor, LatencyStats
 from limitador.rules import (
     GAME_MODE_MAX_DELAY_MS,
@@ -240,9 +240,7 @@ def main() -> int:
     best = min(limited.avg_ms, gentle.avg_ms)
     reference = max(loaded.avg_ms, idle.avg_ms)
     if passthrough.avg_ms > reference + 20:
-        print(
-            f"\n  RESULTADO: el coste está en el MOTOR, no en el recorte. Sin ningún límite, solo"
-        )
+        print("\n  RESULTADO: el coste está en el MOTOR, no en el recorte. Sin ningún límite, solo")
         print(
             f"             capturando y reinyectando, el ping sube a {passthrough.avg_ms:.0f} ms "
             f"({passthrough.avg_ms - base:+.0f} ms)."
