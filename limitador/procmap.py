@@ -2,9 +2,11 @@
 
 Two sources are merged, because neither is complete on its own:
 
-* **Socket layer events** (WinDivert, layer ``SOCKET``) report ``BIND``/``LISTEN``/
-  ``CONNECT``/``ACCEPT``/``CLOSE`` events carrying ``processId``, ``localPort`` and
-  ``protocol``. Exact, but only for connections created after we start.
+* **Layer events** (WinDivert): the ``FLOW`` layer reports ``BOUND``/``LISTEN``/
+  ``ESTABLISHED``/``DELETED`` events carrying ``ProcessId``, ``LocalPort`` and
+  ``Protocol``; the older ``SOCKET`` layer reports the equivalent ``BIND``/``LISTEN``/
+  ``CONNECT``/``ACCEPT``/``CLOSE`` events. Exact and instant, but only for connections
+  created (or closed) after we start.
 * **``GetExtendedTcpTable`` / ``GetExtendedUdpTable``** (iphlpapi) enumerate every
   open endpoint with its owning PID. Catches connections that already existed and
   survives missed events, so it is polled once per second as the source of truth.
@@ -214,14 +216,25 @@ class ProcessMap:
             self._event_ports = {k: v for k, v in self._event_ports.items() if k not in ports}
             self.last_error = None
 
-    # ------------------------------------------------------------- socket events
-    def note_socket_event(self, proto: int, local_port: int, pid: int) -> None:
-        """Feed one WinDivert socket-layer event into the map."""
+    # -------------------------------------------------------------- layer events
+    def note_endpoint_event(self, proto: int, local_port: int, pid: int) -> None:
+        """Feed one WinDivert flow/socket-layer event into the map.
+
+        Solo rellena huecos: en cuanto la tabla de conexiones conoce el puerto, manda ella
+        (es la fuente de verdad y ademas limpia lo que ya no existe).
+        """
         if proto not in (6, 17) or local_port <= 0 or pid <= 0:
             return
         with self._lock:
             if (proto, local_port) not in self._ports:
                 self._event_ports[(proto, local_port)] = pid
+
+    def forget_endpoint(self, proto: int, local_port: int) -> None:
+        """A flow closed: drop it so a reused port is not attributed to the old process."""
+        if local_port <= 0:
+            return
+        with self._lock:
+            self._event_ports.pop((proto, local_port), None)
 
     # -------------------------------------------------------------------- lookups
     def pid_for(self, proto: int, local_port: int) -> int | None:

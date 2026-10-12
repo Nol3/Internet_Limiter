@@ -131,9 +131,20 @@ Windows no dice «este paquete es de Chrome». Se deduce:
 - Cada paquete tiene un puerto local (origen en salida, destino en entrada).
 - `GetExtendedTcpTable` / `GetExtendedUdpTable` (iphlpapi) enumeran todos los extremos abiertos
   con su PID propietario. Se refresca cada segundo en un hilo aparte.
-- La capa `SOCKET` de WinDivert daría los eventos `BIND`/`CONNECT` con `processId` en tiempo real,
-  pero **en este equipo devuelve error 87 al abrirla**, así que se usa solo si funciona y la
-  atribución real cae en la tabla de conexiones (con hasta ~1 s de retraso para flujos nuevos).
+- Las capas de **eventos** de WinDivert dan la atribución exacta y en tiempo real:
+  - `FLOW` entrega los eventos `BOUND`/`LISTEN`/`ESTABLISHED`/`DELETED` con `ProcessId`,
+    `LocalPort` y `Protocol`. Es la vía pensada para esto, así que se intenta primero.
+  - `SOCKET` es la alternativa clásica (`BIND`/`CONNECT`/`ACCEPT`/`CLOSE`).
+  - **Hay que abrirlas en modo solo lectura (`WINDIVERT_FLAG_RECV_ONLY`)**: estas capas no
+    pueden devolver nada al driver, y sin ese flag `WinDivertOpen` responde error 87
+    («parámetro no válido»). Ese error fue durante meses la razón de creer que la capa no
+    existía en este equipo; `tools\probe_layers.py` lo aclaró probando capa x flags.
+  - Se prueban en cascada (FLOW antes que SOCKET, con y sin `SNIFF`) y el registro anota
+    cuál se consiguió abrir; la pestaña *Aplicaciones* lo muestra.
+  - Si ninguna abre, la atribución cae en la tabla de conexiones, que se refresca cada segundo
+    (hasta ~1 s de retraso para flujos nuevos). El límite global no se ve afectado en ningún caso.
+  - Los eventos solo rellenan huecos: en cuanto la tabla conoce el puerto, manda ella. Un evento
+    `DELETED`/`CLOSE` borra la entrada, para no atribuir un puerto reutilizado al proceso anterior.
 
 La clave del planificador es el **nombre del ejecutable**, no el PID: un PID cambia en cada
 arranque, así que las reglas se guardan por ruta normalizada (`os.path.normcase`) y se resuelven a
@@ -170,7 +181,7 @@ un hilo de captura muerto, y verifica en los tres casos que ningún paquete se q
 ```
 captura (1 por dirección)   recv -> clasificar -> reinyectar ya, o encolar
 inyección (1 por dirección) desencolar -> planificar -> dormir -> send
-sockets (opcional)          eventos de la capa SOCKET -> mapa puerto->PID
+eventos (opcional, 1)       eventos de las capas FLOW/SOCKET -> mapa puerto->PID
 procmap (1)                 refresca la tabla de conexiones cada 1 s
 vigilante (1)               comprueba que los hilos siguen vivos
 ```
@@ -184,6 +195,25 @@ vigilante (1)               comprueba que los hilos siguen vivos
   el programa se colgaba).
 - El reloj del sistema se sube a 1 ms (`timeBeginPeriod(1)`) mientras se limita, para que los
   sueños de milisegundos sean fiables.
+
+### Rendimiento medido (y su techo)
+
+| Medición | Resultado |
+|----------|-----------|
+| Reenvío sin límites (mismo hilo, sin cola) | ~82 MB/s |
+| Pipeline con el descriptor falso (cola + hilos, sin driver) | 30 MB/s al 100 % del objetivo |
+| Reenvío **con límite activo** (dos hilos sobre el mismo descriptor) | ~12 MB/s |
+
+El pipeline de Python no es el cuello (sostiene 30 MB/s sin driver), así que la diferencia está
+en hablar con el driver a la vez desde el hilo de captura (`WinDivertRecv`) y el de inyección
+(`WinDivertSend`) sobre el **mismo descriptor**: el driver serializa ambas operaciones. El
+siguiente paso identificado es abrir un descriptor propio para inyectar (marcando los paquetes
+propios como *impostor* en el filtro de captura para que no se recapturen).
+
+Aparte, cuando el objetivo está muy por debajo de la línea, recortar exige descartar el exceso y
+TCP reacciona bajando su ritmo: la velocidad final puede quedar por debajo del objetivo sin que
+el limitador deje de aplicar el límite (se ve en `tools\rate_probe.py` y lo reporta como nota la
+prueba de aceptación).
 
 ---
 

@@ -313,6 +313,13 @@ def main() -> int:
         print(f"{heading:<40}{entry['mbps']:>9.2f} MB/s{ratio:>7.0%} del objetivo  {state}")
         if entry.get("shaper"):
             print(f"{'    (lo que aplica el planificador)':<40}{entry['shaper']:>9.2f} MB/s")
+            if entry["shaper"] < entry["target"] * 0.6:
+                # El planificador tampoco llega al objetivo: no está frenando él, no le llegan
+                # datos. Los espejos públicos estrangulan la IP tras unos cientos de MB.
+                print(
+                    "    NOTA: el servidor no envía suficiente para llegar al objetivo "
+                    "(no es el limitador). Prueba con --limit más bajo."
+                )
     print("=" * 62)
     if not verdicts:
         print("RESULTADO: solo referencia (sin fases de límite, no hay veredicto)")

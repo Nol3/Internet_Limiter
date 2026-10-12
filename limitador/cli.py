@@ -306,7 +306,7 @@ def summarise(samples: list[dict], config: Config, final) -> dict:
         "dropped_up_bytes": final.dropped_up,
         "dropped_packets": final.dropped_packets,
         "queue_overflows": final.queue_overflows,
-        "socket_events_ok": final.socket_events_ok,
+        "event_layer": final.event_layer or None,
         "per_pid": {
             str(pid): {"down_bytes": d, "up_bytes": u} for pid, (d, u) in final.per_pid.items()
         },
@@ -350,7 +350,7 @@ def print_report(report: dict) -> None:
     )
     print(
         f"  Capa de sockets (atribución por proceso): "
-        f"{'activa' if report['socket_events_ok'] else 'no disponible'}"
+        f"{report['event_layer'] or 'no disponible (tabla de conexiones)'}"
     )
     if report["per_pid"]:
         print("  Procesos con tráfico (bytes bajada/subida):")

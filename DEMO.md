@@ -99,7 +99,7 @@ misma velocidad que sin limitador: es la prueba de que el motor no pierde paquet
 |---------|-------------|
 | La referencia sale más lenta que el límite | Tu conexión va más despacio que el límite configurado: usa `--limit 1` para que se note la diferencia. |
 | «Ningún espejo de pruebas responde» | Los servidores públicos de *speed test* fallan o te limitan por IP. Espera un rato o usa `--url <otro-espejo>`. |
-| El límite por aplicación tarda ~1 s en notarse | La atribución por proceso usa la tabla de conexiones (se refresca cada segundo). El límite global no tiene ese retardo. |
+| El límite por aplicación tarda ~1 s en notarse | La atribución por proceso usa la tabla de conexiones cuando tu equipo no permite abrir las capas de eventos de WinDivert (se refresca cada segundo). El límite global no tiene ese retardo. La pestaña *Aplicaciones* dice qué fuente está usando; `tools\probe_layers.py` dice qué capas acepta tu equipo. |
 | La velocidad real es un 3-8 % menor que el objetivo | Normal: cabeceras TCP/IP y retransmisiones cuentan como bytes pero no como datos útiles. |
 | Se queda sin internet | No debería: al morir el proceso se liberan los descriptores y la red vuelve. Si aun así pasa: `tools\unblock.cmd` (como administrador). Ver el README. |
 

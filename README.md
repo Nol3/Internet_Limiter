@@ -27,21 +27,26 @@
 
 ### Verificado en hardware real
 
-Prueba de aceptación automatizada (`tools/acceptance_test.py`) sobre una línea de 27 MB/s:
+Prueba de aceptación automatizada (`tools/acceptance_test.py`), sobre una línea medida en dos
+muestreos (arranque y sostenida) para que un espejo que estrangula no se confunda con un fallo:
 
 | Fase | Resultado |
 |------|-----------|
-| Captura activa sin límites | petición HTTP 200 en 0,68 s, tráfico reinyectado al 100 % |
-| Línea sin límite (referencia) | 27,36 MB/s |
-| Límite global de 9,12 MB/s | **8,84 MB/s (97 % del objetivo)** |
-| Límite solo a `curl.exe` de 9,12 MB/s | **8,40 MB/s (92 % del objetivo)** |
-| Descartado por AQM / captura liberada por seguridad | 5,16 MB / no |
+| Captura activa sin límites | petición HTTP 200 en 0,66 s, tráfico reinyectado al 100 % |
+| Línea sin límite | 31,06 MB/s de arranque · 26,51 MB/s sostenida |
+| Límite global de 8,84 MB/s | **7,65 MB/s (87 % del objetivo)**, 2,6 % de descartes propios |
+| Límite solo a `curl.exe` de 8,84 MB/s | **6,09 MB/s medidos por el archivo, 9,28 MB/s por el motor** |
+| Atribución por proceso | **capa FLOW** de WinDivert activa (instantánea) |
+| Captura liberada por seguridad | no |
 
 Precisión del planificador medida en tiempo real (`tools/pacing_check.py`):
 30 MB/s → 100,0 %, 10 MB/s → 100,0 %, 3 MB/s → 100,0 %, 0,5 MB/s → 100,2 %.
+El pipeline de Python sostiene 30 MB/s con el descriptor falso (100 %, ver `tests/`).
 
-Para repetirlo en tu equipo: `tools\demo.cmd` (tres mediciones reales, pide UAC una vez) o
-`tools\run_elevated.ps1` (prueba completa, fases 0-3).
+Para repetirlo en tu equipo: `tools\demo.cmd` (tres mediciones reales) o
+`tools\run_elevated.ps1` (prueba completa, fases 0-3). `tools\rate_probe.py` mide la velocidad
+real con varias tasas y presupuestos de retardo; `tools\probe_layers.py` dice qué capas de
+WinDivert acepta tu equipo.
 
 ### La interfaz
 
@@ -132,7 +137,7 @@ bytes descartados, y termina con un resumen (media, pico, % del objetivo, descar
 | **WinDivert 2.2.2** (vía `pydivert` 4) | Intercepta paquetes IPv4/IPv6 a nivel de kernel |
 | **Planificador por fecha de salida** | Calcula cuándo puede salir cada paquete (`depart = max(ahora, anterior) + tamaño/tasa`) |
 | **AQM con presupuesto de retardo** | Descarta el sobrante cuando la cola supera `tasa × retardo_máx` (y **nunca** descarta en un enlace ocioso) |
-| **Atribución puerto → proceso** | Tabla de conexiones TCP/UDP (y capa de sockets de WinDivert cuando el build la soporta) |
+| **Atribución puerto → proceso** | Capa de eventos **FLOW** de WinDivert (solo lectura) con la capa **SOCKET** y la tabla de conexiones TCP/UDP como respaldo |
 | **Filtros validados** | El filtro se compila con el compilador de WinDivert antes de capturar nada |
 | **Fail-open** | Si un hilo del motor muere, la captura se libera automáticamente para no dejar sin internet |
 
@@ -144,11 +149,23 @@ El diseño completo, con las decisiones y las trampas encontradas, está en
 - **Solo Windows 10/11 x64.** El driver y la API de atribución de procesos son de Windows.
 - **El tráfico de la red local no se limita** (10.x, 172.16-31.x, 192.168.x, multicast,
   broadcast): es deliberado, para no romper la red de casa. Se puede desactivar en Avanzado.
-- **La capa de sockets de WinDivert no está disponible en este equipo** (el driver devuelve
-  error 87 al abrirla), así que la atribución por proceso usa la tabla de conexiones, que se
-  refresca cada segundo. Consecuencia práctica: un flujo recién abierto puede tardar hasta
-  ~1 s en quedar bajo su límite por aplicación. El límite global no se ve afectado.
+- **Atribución por proceso**: el motor prueba primero la capa **FLOW** de WinDivert (entrega el
+  proceso de cada flujo en cuanto se establece), después la capa **SOCKET** clásica y, si ninguna
+  abre en tu equipo, la tabla de conexiones (refresco de 1 s). Solo en ese último caso un flujo
+  recién abierto puede tardar hasta ~1 s en quedar bajo su límite por aplicación; el límite global
+  no se ve afectado. La pestaña *Aplicaciones* indica qué fuente está en uso, y el registro dice
+  cuál se consiguió abrir.
 - **No inspecciona contenido** (no es un firewall ni un filtro de URLs): solo mide y regula tasa.
+- **El techo de velocidad real depende de la línea.** Medido: con objetivos por debajo de un tercio
+  de la línea, el tráfico limitado sale al 87-100 % del objetivo. Recortar una línea **muy rápida**
+  (medido en una de ~75 MB/s) exige descartar el exceso, y TCP responde bajando su ritmo: ahí la
+  velocidad final se queda alrededor de ~12 MB/s aunque se pida más. No es que el limitador deje de
+  aplicar el límite (lo aplica: el tráfico no pasa a velocidad de línea y los descartes propios son
+  pequeños), es el emisor el que se frena. Medido con `tools\rate_probe.py`.
+- **El pipeline de Python sostiene 30 MB/s** con el descriptor falso (sin driver), así que ese
+  techo no está en la lógica: está en la interacción con el driver al capturar e inyectar a la vez
+  desde dos hilos sobre el mismo descriptor. Siguiente paso identificado: descriptor propio para la
+  inyección.
 - Un paquete TCP sin carga (ACK puro), DNS e ICMP no se limitan por defecto: retardarlos sube
   la latencia sin controlar nada. Se puede desactivar en Avanzado.
 - No hay límites por «grupo de aplicaciones» ni por interfaz de red (todavía).

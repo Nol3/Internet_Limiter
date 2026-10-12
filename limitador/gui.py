@@ -282,10 +282,10 @@ class LimitadorApp(tk.Tk):
             side="right", padx=8
         )
 
+        self.attribution_var = tk.StringVar(value="Atribución: tabla de conexiones")
         ttk.Label(
             tab,
-            text="La atribución usa los puertos locales de cada proceso "
-            "(capa de sockets de WinDivert + tabla de conexiones).",
+            textvariable=self.attribution_var,
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(6, 0))
 
@@ -586,7 +586,7 @@ class LimitadorApp(tk.Tk):
         )
         self.stats_var.set(
             f"Puertos identificados: {snapshot.port_entries} · "
-            f"capa de sockets: {'activa' if snapshot.socket_events_ok else 'no disponible'}\n"
+            f"atribución por proceso: {snapshot.event_layer or 'tabla de conexiones'}\n"
             f"Retardo máx. configurado: {settings.max_delay_ms:.0f} ms · "
             f"desbordes de cola: {snapshot.queue_overflows}\n"
             f"Reglas activas: {len(self.config_data.active_rules())}"
@@ -664,6 +664,15 @@ class LimitadorApp(tk.Tk):
                 shown += 1
 
         self.apps_count_var.set(f"{shown} aplicación{'es' if shown != 1 else ''}")
+        layer = snapshot.event_layer if snapshot is not None else ""
+        if layer == "flow":
+            self.attribution_var.set("Atribución: capa FLOW de WinDivert (instantánea)")
+        elif layer == "socket":
+            self.attribution_var.set("Atribución: capa de sockets de WinDivert (instantánea)")
+        else:
+            self.attribution_var.set(
+                "Atribución: tabla de conexiones (hasta 1 s de retardo en flujos nuevos)"
+            )
         self.apps_tree.tag_configure("limited", foreground=ACCENT)
         if selected is not None:
             for item, pid in self._app_rows.items():

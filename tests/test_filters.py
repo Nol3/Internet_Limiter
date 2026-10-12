@@ -17,7 +17,12 @@ from pydivert import windivert_dll
 from pydivert.consts import Layer
 from pydivert.windivert_dll import WinDivertAddress
 
-from limitador.filters import build_network_filter, validate_filter
+from limitador.filters import (
+    build_flow_filter,
+    build_network_filter,
+    build_socket_filter,
+    validate_filter,
+)
 
 
 def ipv4_tcp(src: str, dst: str, sport: int = 50000, dport: int = 443, payload: int = 0) -> bytes:
@@ -113,3 +118,17 @@ def test_loopback_never_matches():
 def test_disabling_lan_exclusion_captures_local_traffic_too():
     filt = build_network_filter("outbound", exclude_lan=False)
     assert evaluates_to(filt, ipv4_tcp("192.168.1.10", "192.168.1.20"), outbound=True) is True
+
+
+def test_event_layer_filters_compile_for_their_own_layers():
+    """La atribución por proceso depende de que estos filtros compilen en su capa.
+
+    Se comprueba con el compilador de WinDivert (sin driver ni administrador), que es
+    justo lo que la v1 nunca hizo con su filtro de red.
+    """
+    for filter_string, layer in (
+        (build_flow_filter(), Layer.FLOW),
+        (build_socket_filter(), Layer.SOCKET),
+    ):
+        ok, message = validate_filter(filter_string, layer)
+        assert ok, f"{layer.name}: {message}"

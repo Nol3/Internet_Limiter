@@ -71,7 +71,16 @@ def build_network_filter(
 
 
 def build_socket_filter() -> str:
-    """Any socket-layer event: gives (protocol, local port) -> owning process."""
+    """Cualquier evento de la capa de sockets: da (protocolo, puerto local) -> proceso."""
+    return "true"
+
+
+def build_flow_filter() -> str:
+    """Cualquier evento de la capa de flujos: la via moderna para atribuir a procesos.
+
+    La capa FLOW entrega el ``ProcessId`` de cada flujo en cuanto se establece, asi que
+    no hace falta esperar al refresco de la tabla de conexiones.
+    """
     return "true"
 
 

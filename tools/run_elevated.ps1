@@ -24,10 +24,28 @@ if ($TimeoutSec -le 0) { $TimeoutSec = ($Seconds * 4) + 120 }
 
 if (Test-Path $output) { Remove-Item $output -Force }
 
-Write-Host "Solicitando privilegios de administrador (acepta el aviso de Windows)…"
-$inner = "`"$python`" -u `"$root\tools\$Script`" $ScriptArgs > `"$output`" 2>&1"
-$process = Start-Process -Verb RunAs -PassThru -FilePath "cmd.exe" `
-    -ArgumentList "/c", $inner
+# El lanzamiento va en un .cmd temporal en lugar de una linea de comandos construida a mano:
+# citar rutas, argumentos y la redireccion desde PowerShell se rompe con facilidad, y el
+# fallo inmediato se confunde con "el usuario cancelo el aviso de UAC" (paso, y costo horas).
+$runner = Join-Path $env:TEMP "limitador_$name.cmd"
+$lines = @(
+    "@echo off",
+    "chcp 65001 >nul",
+    "cd /d `"$root`"",
+    "`"$python`" -u `"$root\tools\$Script`" $ScriptArgs > `"$output`" 2>&1",
+    "echo EXITCODE=%ERRORLEVEL% >> `"$output`""
+)
+Set-Content -Path $runner -Value $lines -Encoding ASCII
+
+Write-Host "Solicitando privilegios de administrador (si Windows lo pide, acepta el aviso)…"
+try {
+    $process = Start-Process -Verb RunAs -PassThru -FilePath "cmd.exe" `
+        -ArgumentList "/c", "`"$runner`"" -ErrorAction Stop
+} catch {
+    Write-Host "[ERROR] no se pudo iniciar con privilegios: $($_.Exception.Message)"
+    Remove-Item $runner -Force -ErrorAction SilentlyContinue
+    exit 1
+}
 
 if (-not $process.WaitForExit($TimeoutSec * 1000)) {
     Write-Host "[AVISO] el script excedió $TimeoutSec s: matando el proceso para liberar la red…"
@@ -38,5 +56,6 @@ if (-not $process.WaitForExit($TimeoutSec * 1000)) {
 if (Test-Path $output) {
     Get-Content -Encoding UTF8 $output
 } else {
-    Write-Host "[ERROR] no se generó $output (¿se canceló el aviso de UAC?)"
+    Write-Host "[ERROR] el script no dejó salida en $output (código de salida $($process.ExitCode))"
 }
+Remove-Item $runner -Force -ErrorAction SilentlyContinue

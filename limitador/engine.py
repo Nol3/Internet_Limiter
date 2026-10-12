@@ -43,11 +43,16 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pydivert import WinDivert
-from pydivert.consts import Layer
+from pydivert.consts import Flag, Layer
 
 from . import classify, driver
 from .classify import inspect_safe, should_pass_through
-from .filters import build_network_filter, build_socket_filter, validate_filter
+from .filters import (
+    build_flow_filter,
+    build_network_filter,
+    build_socket_filter,
+    validate_filter,
+)
 from .procmap import ProcessMap
 from .rules import AppRule, Config
 from .shaper import Shaper
@@ -64,6 +69,40 @@ ERROR_ACCESS_DENIED = 5
 RULE_CACHE_TTL_SECONDS = 5.0
 #: Tope de entradas del caché de reglas por PID (válvula de seguridad).
 MAX_CACHED_PIDS = 4096
+
+#: Tipos de evento de las capas FLOW y SOCKET (``windivert.h``). Ojo: los valores 0-3 se
+#: comparten entre capas pero **no significan lo mismo**; el 4 solo existe en la de sockets.
+#: ``Packet.event`` entrega el número, no un nombre.
+EVENT_FLOW_BOUND = 0
+EVENT_FLOW_LISTEN = 1
+EVENT_FLOW_ESTABLISHED = 2
+EVENT_FLOW_DELETED = 3
+EVENT_SOCKET_BIND = 0  # mismos números que las de flujo, distinto significado
+EVENT_SOCKET_LISTEN = 1
+EVENT_SOCKET_CONNECT = 2
+EVENT_SOCKET_ACCEPT = 3
+EVENT_SOCKET_CLOSE = 4
+
+#: Qué código significa «este flujo se ha cerrado» en cada capa.
+EVENT_CLOSED_CODES = {
+    "flow": frozenset({EVENT_FLOW_DELETED}),
+    "socket": frozenset({EVENT_SOCKET_CLOSE}),
+}
+
+#: Capas de eventos de WinDivert, por orden de preferencia: la primera que abra, se usa.
+#: FLOW es la ideal (entrega el ProcessId de cada flujo en cuanto se establece); SOCKET es
+#: la alternativa clásica. Las capas de eventos no pueden devolver nada al driver, así que
+#: hay que abrirlas en modo solo lectura: sin ``RECV_ONLY`` el driver responde error 87
+#: (parámetro no válido). Comprobado con tools\probe_layers.py en Windows 11 25H2; las
+#: variantes sin RECV_ONLY se dejan al final por si otra build las acepta.
+EVENT_LAYER_CANDIDATES: tuple[tuple[str, Layer, Flag], ...] = (
+    ("flow", Layer.FLOW, Flag.RECV_ONLY),
+    ("flow", Layer.FLOW, Flag.SNIFF | Flag.RECV_ONLY),
+    ("socket", Layer.SOCKET, Flag.RECV_ONLY),
+    ("socket", Layer.SOCKET, Flag.SNIFF | Flag.RECV_ONLY),
+    ("flow", Layer.FLOW, Flag.DEFAULT),
+    ("socket", Layer.SOCKET, Flag.DEFAULT),
+)
 
 
 class LimiterError(RuntimeError):
@@ -161,7 +200,8 @@ class Snapshot:
     shapers: dict[str, dict] = field(default_factory=dict)
     uptime: float = 0.0
     errors: list[str] = field(default_factory=list)
-    socket_events_ok: bool = False
+    #: Capa de eventos en uso ("" si ninguna): "flow", "socket" o "".
+    event_layer: str = ""
     port_entries: int = 0
 
 
@@ -194,7 +234,7 @@ class Engine:
         self._handles: list[object] = []
         self._capture_threads: dict[str, threading.Thread] = {}
         self._inject_threads: dict[str, threading.Thread] = {}
-        self._socket_thread: threading.Thread | None = None
+        self._event_thread: threading.Thread | None = None
         self._supervisor: threading.Thread | None = None
         self._queues: dict[str, _ByteQueue] = {}
         self._global_shapers: dict[str, Shaper] = {}
@@ -207,7 +247,7 @@ class Engine:
         self._dropped = {"in": 0, "out": 0}
         self._dropped_packets = 0
         self._per_pid: dict[int, list[int]] = {}
-        self._socket_events_ok = False
+        self._event_layer = ""
         self._timer_raised = False
 
     # ------------------------------------------------------------------ lifecycle
@@ -251,8 +291,10 @@ class Engine:
             self._released = False
             self._raise_timer_resolution()
             self.procmap.start()
-            self._start_socket_listener()
+            # _running antes de arrancar el hilo de eventos: si su primera lectura fallara,
+            # el bucle debe seguir vivo (solo sale cuando la parada es deliberada).
             self._running = True
+            self._start_event_listener()
             self._paused = False
             self._started_at = time.monotonic()
             for direction in ("in", "out"):
@@ -327,9 +369,9 @@ class Engine:
         self._close_handles()
         self._capture_threads.clear()
         self._inject_threads.clear()
-        if self._socket_thread is not None:
-            self._socket_thread.join(timeout=1.0)
-            self._socket_thread = None
+        if self._event_thread is not None:
+            self._event_thread.join(timeout=1.0)
+            self._event_thread = None
         with contextlib.suppress(Exception):  # pragma: no cover
             self.procmap.stop()
         with self._shape_lock:
@@ -672,44 +714,69 @@ class Engine:
                 self.emergency_release("se han detenido hilos del motor (" + ", ".join(dead) + ")")
                 break
 
-    def _start_socket_listener(self) -> None:
-        """Socket-layer events give exact (protocol, port) -> PID attribution.
+    def _start_event_listener(self) -> None:
+        """Atribución exacta puerto -> proceso usando las capas de eventos de WinDivert.
 
-        Optional: not every Windows build/driver combination allows this layer, in which
-        case per-application attribution falls back to the connection tables.
+        Prueba FLOW primero (la capa pensada para esto: entrega el ``ProcessId`` de cada
+        flujo en cuanto se establece) y luego SOCKET. Si ninguna abre, la atribución por
+        aplicación sigue funcionando con la tabla de conexiones, que se refresca cada
+        segundo: esto solo elimina el retardo en flujos recién abiertos.
         """
-        try:
-            handle = self._handle_factory(build_socket_filter(), Layer.SOCKET)
-            handle.open()
-        except Exception as exc:
-            self._emit(
-                "warning",
-                f"Capa de sockets no disponible ({exc}); "
-                "se usa la tabla de conexiones para atribuir el tráfico",
+        for name, layer, flags in EVENT_LAYER_CANDIDATES:
+            filter_string = build_flow_filter() if name == "flow" else build_socket_filter()
+            try:
+                handle = self._handle_factory(filter_string, layer, 0, flags)
+                handle.open()
+            except Exception as exc:
+                log.debug("capa de eventos %s (flags=%s) no disponible: %s", name, flags, exc)
+                continue
+            self._handles.append(handle)
+            self._event_layer = name
+            self._emit("info", f"atribución por proceso: capa {name.upper()} (instantánea)")
+            self._event_thread = threading.Thread(
+                target=self._event_loop,
+                args=(handle, name),
+                name=f"limitador-{name}",
+                daemon=True,
             )
+            self._event_thread.start()
             return
-        self._handles.append(handle)
-        self._socket_events_ok = True
 
-        def loop() -> None:
-            while self._running:
-                try:
-                    packet = handle.recv()
-                except Exception:
+        self._event_layer = ""
+        self._emit(
+            "warning",
+            "ninguna capa de eventos de WinDivert se pudo abrir: se atribuye el tráfico con "
+            "la tabla de conexiones (hasta 1 s de retardo en flujos nuevos)",
+        )
+
+    def _event_loop(self, handle: object, field: str) -> None:
+        """Lee eventos de flujo/socket y alimenta el mapa de procesos. Nunca lanza."""
+        while True:
+            try:
+                packet = handle.recv()
+            except Exception:
+                # El descriptor se cerró (parada normal) o la capa falló: en ambos casos
+                # la tabla de conexiones sigue atribuyendo, así que salir es seguro.
+                if self._stopping or not self._running:
                     break
-                try:
-                    sock = getattr(packet, "socket", None)
-                    if sock is not None:
-                        self.procmap.note_socket_event(
-                            int(sock.Protocol), int(sock.LocalPort), int(sock.ProcessId)
-                        )
-                except Exception:
-                    pass
-                finally:
-                    self._send(handle, packet)  # socket events must be released
-
-        self._socket_thread = threading.Thread(target=loop, name="limitador-sockets", daemon=True)
-        self._socket_thread.start()
+                time.sleep(0.2)
+                continue
+            try:
+                endpoint = getattr(packet, field, None)
+                if endpoint is not None:
+                    proto = int(getattr(endpoint, "Protocol", 0))
+                    port = int(getattr(endpoint, "LocalPort", 0))
+                    pid = int(getattr(endpoint, "ProcessId", 0))
+                    code = int(getattr(packet, "event", -1))
+                    if code in EVENT_CLOSED_CODES[field]:
+                        self.procmap.forget_endpoint(proto, port)
+                    else:
+                        self.procmap.note_endpoint_event(proto, port, pid)
+            except Exception:
+                # Un evento raro no puede matar el hilo: la tabla de conexiones sigue ahí.
+                pass
+            # No se devuelve nada: el descriptor es de solo lectura y los eventos de estas
+            # capas son informativos (no hay paquete que reinyectar).
 
     # -------------------------------------------------------------------- reporting
     def _emit(self, level: str, message: str) -> None:
@@ -758,7 +825,7 @@ class Engine:
             shapers=shapers,
             uptime=(time.monotonic() - self._started_at) if self._running else 0.0,
             errors=list(self._errors),
-            socket_events_ok=self._socket_events_ok,
+            event_layer=self._event_layer,
             port_entries=self.procmap.size,
         )
 

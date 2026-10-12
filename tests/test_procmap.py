@@ -61,9 +61,21 @@ def test_process_map_resolves_name_and_pid():
 def test_socket_events_fill_gaps_the_poll_does_not_know():
     pmap = ProcessMap(poll_interval=10)
     pmap.refresh()
-    pmap.note_socket_event(6, 59999, 4321)
+    pmap.note_endpoint_event(6, 59999, 4321)
     assert pmap.pid_for(6, 59999) == 4321
     assert pmap.pid_for(17, 59999) is None  # protocol must match
     assert pmap.pid_for(6, -1) is None
-    pmap.note_socket_event(99, 1234, 4321)  # unsupported protocol ignored
+    pmap.note_endpoint_event(99, 1234, 4321)  # unsupported protocol ignored
     assert pmap.pid_for(99, 1234) is None
+
+
+def test_a_closed_flow_is_forgotten():
+    """Un flujo cerrado debe dejar de atribuir su puerto (se puede reutilizar)."""
+    pmap = ProcessMap(poll_interval=10)
+    pmap.refresh()
+    pmap.note_endpoint_event(6, 59998, 4321)
+    assert pmap.pid_for(6, 59998) == 4321
+    pmap.forget_endpoint(6, 59998)
+    assert pmap.pid_for(6, 59998) is None
+    pmap.forget_endpoint(6, -1)  # no debe fallar con puertos inválidos
+    pmap.forget_endpoint(6, 12345)  # ni con puertos que no están en el mapa

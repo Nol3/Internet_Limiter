@@ -18,6 +18,7 @@ import threading
 import time
 
 import pytest
+from pydivert.consts import Flag, Layer
 
 from limitador import engine as engine_mod
 from limitador.engine import Engine
@@ -28,18 +29,40 @@ DEMO_EXE = r"C:\test\demo.exe"
 
 
 # --------------------------------------------------------------------- fake driver
+class FakeEndpoint:
+    """Mimics pydivert's Socket/Flow objects delivered by the event layers."""
+
+    def __init__(self, proto: int, local_port: int, pid: int) -> None:
+        self.Protocol = proto
+        self.LocalPort = local_port
+        self.ProcessId = pid
+
+
 class FakePacket:
     """Mimics pydivert's Packet: a ``raw`` memoryview is the only thing we rely on."""
 
-    def __init__(self, raw: bytes) -> None:
+    def __init__(self, raw: bytes = b"", *, flow=None, socket=None, event: str = "") -> None:
         self.raw = memoryview(bytes(raw))
-        self.socket = None
+        self.socket = socket
+        self.flow = flow
+        self.event = event
 
 
 class FakeHandle:
-    def __init__(self, filter_string: str = "true", layer: int = 0) -> None:
+    """No event layer opens by default: that is what the real driver does on this machine.
+
+    Subclasses flip ``FAILING_LAYERS`` to emulate a machine where FLOW or SOCKET works.
+    """
+
+    FAILING_LAYERS: frozenset = frozenset({2, 3})  # Layer.FLOW, Layer.SOCKET
+
+    def __init__(
+        self, filter_string: str = "true", layer: int = 0, priority: int = 0, flags: int = 0
+    ) -> None:
         self.filter = filter_string
         self.layer = layer
+        self.priority = priority
+        self.flags = flags
         self.inbox: queue.Queue = queue.Queue()
         self.sent: list[FakePacket] = []
         self.closed = False
@@ -48,7 +71,7 @@ class FakeHandle:
 
     # pydivert API -------------------------------------------------------------
     def open(self):
-        if self.layer == 3:  # Layer.SOCKET in the fake, to emulate WinError 87
+        if self.layer in self.FAILING_LAYERS:  # emulate WinError 87
             raise OSError(87, "El parámetro no es correcto.")
         return self
 
@@ -78,7 +101,19 @@ class FakeHandle:
 
 
 class NoSocketHandle(FakeHandle):
-    """Fails at the socket layer exactly like the real driver did on this machine."""
+    """Ninguna capa de eventos abre: cae a la tabla de conexiones."""
+
+
+class FlowOnlyHandle(FakeHandle):
+    """Solo la capa FLOW abre (la ideal)."""
+
+    FAILING_LAYERS = frozenset({3})
+
+
+class SocketOnlyHandle(FakeHandle):
+    """Solo la capa SOCKET abre (la alternativa clásica)."""
+
+    FAILING_LAYERS = frozenset({2})
 
 
 def tcp_packet(
@@ -202,13 +237,127 @@ def test_watchdog_releases_the_capture_when_a_worker_dies(fake_driver):
         engine.stop()
 
 
-def test_socket_layer_failure_does_not_prevent_limiting(fake_driver):
+def test_no_event_layer_falls_back_to_the_connection_table(fake_driver):
+    """En este equipo ninguna capa de eventos abre (error 87): limitar debe seguir funcionando."""
     engine = build_engine(Config(settings=Settings(global_down_bps=1 * MB)), NoSocketHandle)
     engine.start()
     try:
         assert engine.is_running
-        assert engine.snapshot().socket_events_ok is False
-        assert len(engine._handles) == 2  # only the two network handles
+        assert engine.snapshot().event_layer == ""
+        assert len(engine._handles) == 2  # solo los dos descriptores de red
+    finally:
+        engine.stop()
+
+
+def _patch_procmap(engine, monkeypatch):
+    """Que la tabla de conexiones real no interfiera con los eventos que inyectamos."""
+    monkeypatch.setattr(engine.procmap, "refresh", lambda: None)
+
+
+def test_flow_layer_is_preferred_and_feeds_attribution(fake_driver):
+    engine = build_engine(Config(settings=Settings(global_down_bps=0)), FlowOnlyHandle)
+    _patch_procmap(engine, fake_driver)
+    engine.start()
+    try:
+        assert engine.snapshot().event_layer == "flow"
+        event_handle = engine._handles[2]  # dos de red + la de eventos
+        assert event_handle.layer == Layer.FLOW
+        event_handle.inbox.put(
+            FakePacket(flow=FakeEndpoint(6, 60001, 4321), event=engine_mod.EVENT_FLOW_ESTABLISHED)
+        )
+        assert wait_until(lambda: engine.procmap.pid_for(6, 60001) == 4321)
+    finally:
+        engine.stop()
+
+
+def test_closed_event_codes_are_per_layer():
+    """El 3 significa ACCEPT en la capa de sockets, no cierre: el código depende de la capa.
+
+    Confundirlos dejaría de olvidar los flujos cerrados (o borraría conexiones vivas).
+    """
+    assert engine_mod.EVENT_FLOW_DELETED in engine_mod.EVENT_CLOSED_CODES["flow"]
+    assert engine_mod.EVENT_FLOW_DELETED not in engine_mod.EVENT_CLOSED_CODES["socket"]
+    assert engine_mod.EVENT_SOCKET_CLOSE in engine_mod.EVENT_CLOSED_CODES["socket"]
+
+
+def test_events_are_not_sent_back_on_a_read_only_handle(fake_driver):
+    """Regresión del error 87: sin RECV_ONLY el driver rechaza las capas de eventos.
+
+    Verificado en Windows 11 25H2 con tools\\probe_layers.py: FLOW y SOCKET solo abren con
+    RECV_ONLY (las capas de eventos no pueden devolver nada al driver).
+    """
+    engine = build_engine(Config(settings=Settings(global_down_bps=0)), FlowOnlyHandle)
+    _patch_procmap(engine, fake_driver)
+    engine.start()
+    try:
+        assert engine.snapshot().event_layer == "flow"
+        event_handle = engine._handles[2]
+        assert event_handle.flags & Flag.RECV_ONLY, "hay que abrir en modo solo lectura"
+        event_handle.inbox.put(
+            FakePacket(flow=FakeEndpoint(6, 60004, 12), event=engine_mod.EVENT_FLOW_ESTABLISHED)
+        )
+        assert wait_until(lambda: engine.procmap.pid_for(6, 60004) == 12)
+        assert event_handle.sent == [], "un descriptor de solo lectura no recibe nada de vuelta"
+    finally:
+        engine.stop()
+
+
+def test_socket_layer_is_used_when_flow_is_unavailable(fake_driver):
+    engine = build_engine(Config(settings=Settings(global_down_bps=0)), SocketOnlyHandle)
+    _patch_procmap(engine, fake_driver)
+    engine.start()
+    try:
+        assert engine.snapshot().event_layer == "socket"
+        event_handle = engine._handles[2]
+        assert event_handle.layer == Layer.SOCKET
+        event_handle.inbox.put(
+            FakePacket(socket=FakeEndpoint(17, 5353, 555), event=engine_mod.EVENT_SOCKET_BIND)
+        )
+        assert wait_until(lambda: engine.procmap.pid_for(17, 5353) == 555)
+    finally:
+        engine.stop()
+
+
+def test_a_closed_flow_is_forgotten_by_the_event_loop(fake_driver):
+    """Un puerto reutilizado no debe heredar el proceso del flujo anterior."""
+    engine = build_engine(Config(settings=Settings(global_down_bps=0)), FlowOnlyHandle)
+    _patch_procmap(engine, fake_driver)
+    engine.start()
+    try:
+        event_handle = engine._handles[2]
+        event_handle.inbox.put(
+            FakePacket(flow=FakeEndpoint(6, 60002, 999), event=engine_mod.EVENT_FLOW_ESTABLISHED)
+        )
+        assert wait_until(lambda: engine.procmap.pid_for(6, 60002) == 999)
+        event_handle.inbox.put(
+            FakePacket(flow=FakeEndpoint(6, 60002, 999), event=engine_mod.EVENT_FLOW_DELETED)
+        )
+        assert wait_until(lambda: engine.procmap.pid_for(6, 60002) is None)
+    finally:
+        engine.stop()
+
+
+def test_a_raising_event_payload_does_not_kill_the_listener(fake_driver):
+    """El hilo de eventos no puede morir por un evento raro (fail-open)."""
+    engine = build_engine(Config(settings=Settings(global_down_bps=0)), FlowOnlyHandle)
+    _patch_procmap(engine, fake_driver)
+    engine.start()
+    try:
+        event_handle = engine._handles[2]
+
+        class HostileEndpoint:
+            @property
+            def Protocol(self):
+                raise RuntimeError("evento inesperado")
+
+        event_handle.inbox.put(
+            FakePacket(flow=HostileEndpoint(), event=engine_mod.EVENT_FLOW_ESTABLISHED)
+        )
+        event_handle.inbox.put(
+            FakePacket(flow=FakeEndpoint(6, 60003, 777), event=engine_mod.EVENT_FLOW_ESTABLISHED)
+        )
+        assert wait_until(lambda: engine.procmap.pid_for(6, 60003) == 777)
+        assert engine.is_running
     finally:
         engine.stop()
 

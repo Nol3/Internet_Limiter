@@ -39,9 +39,28 @@ Esta versión se ha verificado contra la red real.
 
 ### Añadido
 
-- **Límites por aplicación** (lo que hace útil a un NetLimiter): atribución puerto local → proceso
-  con la tabla de conexiones TCP/UDP, capa de sockets de WinDivert cuando está disponible, y
+- **Atribución por aplicación** (lo que hace útil a un NetLimiter): atribución puerto local → proceso
+  con la tabla de conexiones TCP/UDP, capa de eventos de WinDivert cuando está disponible, y
   planificador independiente por aplicación.
+- **Capas de eventos en cascada**: el motor prueba la capa **FLOW** de WinDivert (proceso de cada
+  flujo en cuanto se establece), luego la **SOCKET** clásica y, si ninguna abre, sigue con la tabla
+  de conexiones. Las capas de eventos se abren en modo **solo lectura** (`RECV_ONLY`): sin ese flag
+  el driver devuelve error 87, que era la razón por la que se creía que no estaban disponibles en
+  este equipo. Elimina el retardo de hasta 1 s en flujos nuevos, y el estado de los flujos cerrados
+  se olvida para no atribuir un puerto reutilizado al proceso anterior.
+- **`tools\probe_layers.py`**: sonda que dice qué capas de WinDivert acepta abrir un equipo
+  concreto (capa x flags) y qué campos trae cada evento, en vez de adivinar.
+- **`tools\rate_probe.py`**: mide la velocidad real conseguida con varias tasas y presupuestos de
+  retardo, separando lo que libera el planificador de lo que llega al archivo. Con eso se
+  distingue «el limitador no cumple» de «el emisor no manda más».
+- **Prueba de aceptación más honesta**: muestrea la línea dos veces (arranque y sostenida) para no
+  confundir un espejo que estrangula con un fallo, y su veredicto pregunta lo que importa (¿se
+  aplica el límite?) en lugar de exigir que la descarga clave el objetivo al milímetro.
+- **Hallazgo medido**: recortar una línea muy rápida (~75 MB/s) a ~20 MB/s deja la velocidad final
+  en ~12 MB/s porque TCP reacciona a los descartes necesarios. El límite se aplica (no pasa a
+  velocidad de línea, los descartes propios son pequeños) y el pipeline de Python sostiene 30 MB/s
+  con el descriptor falso, así que el techo está en la interacción captura/inyección con el driver
+  (dos hilos sobre el mismo descriptor), no en la lógica del planificador.
 - **Monitor por aplicación** en vivo (bajada/subida por proceso) y lista de apps con conexiones.
 - **Fail-open garantizado**: el camino por paquete no puede lanzar excepciones; un hilo vigilante
   libera la captura si un hilo del motor muere; la cola se vacía al detener en lugar de descartarse.
