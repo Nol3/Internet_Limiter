@@ -125,9 +125,16 @@ def main() -> int:
             engine.stop()
 
     print(
-        "\nLectura: si 'planificador' se acerca a 'objetivo' pero 'archivo' se queda corto,\n"
-        "el limitador cumple y quien frena la conexión es TCP al añadir retardo (baja el\n"
-        "presupuesto). Si 'planificador' también se queda corto, el cuello está en el motor."
+        "\nLectura:\n"
+        "  · 'planificador' se queda corto y la cola está VACÍA -> el motor libera todo lo que le\n"
+        "    llega: quien no manda más es el emisor (espejo que estrangula la IP, o TCP bajando su\n"
+        "    ritmo por los descartes). No es un fallo del limitador.\n"
+        "  · 'planificador' se queda corto y la cola está LLENA -> el cuello está en el motor\n"
+        "    (o en el presupuesto de retardo).\n"
+        "  · 'planificador' llega al objetivo y 'archivo' no -> el limitador cumple; la velocidad\n"
+        "    final la fija el emisor.\n"
+        "Ojo: la cola vacía distingue un caso del otro, y mirar solo los MB/s lleva a culpar al\n"
+        "limitador de un recorte que hace el servidor (pasó, y costó horas)."
     )
     return 0
 
