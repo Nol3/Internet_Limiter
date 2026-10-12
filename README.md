@@ -162,10 +162,17 @@ El diseño completo, con las decisiones y las trampas encontradas, está en
   velocidad final se queda alrededor de ~12 MB/s aunque se pida más. No es que el limitador deje de
   aplicar el límite (lo aplica: el tráfico no pasa a velocidad de línea y los descartes propios son
   pequeños), es el emisor el que se frena. Medido con `tools\rate_probe.py`.
-- **El pipeline de Python sostiene 30 MB/s** con el descriptor falso (sin driver), así que ese
-  techo no está en la lógica: está en la interacción con el driver al capturar e inyectar a la vez
-  desde dos hilos sobre el mismo descriptor. Siguiente paso identificado: descriptor propio para la
-  inyección.
+- **El techo de velocidad no está ni en la lógica ni en el descriptor.** Medido: el pipeline de
+  Python sostiene 30 MB/s con el descriptor falso (sin driver), y separar captura e inyección en
+  dos descriptores **no cambia nada** (`tools\ab_handles.py`, misma sesión y mismo espejo: ambos
+  modos dan 2-5 MB/s con una línea de 40 MB/s). La precisión del límite depende de cuánto más
+  rápida sea la línea que el objetivo: con la línea a ~26 MB/s y un objetivo de ~9 (un tercio) el
+  tráfico limitado sale al **87-105 %** del objetivo, mientras que con líneas de 40-75 MB/s y
+  objetivos de 8-22 MB/s la velocidad final se queda en unos pocos MB/s porque el emisor se frena
+  al perder los paquetes que hay que descartar. En el rango de uso habitual (recortar una conexión
+  a unos pocos MB/s) el limitador es fiable; para líneas muy rápidas queda por probar el camino de
+  los ACK (retrasarlos en vez de descartar datos), que es lo que hacen los limitadores comerciales.
+  Medido con `tools\rate_probe.py` y `tools\ab_handles.py`.
 - Un paquete TCP sin carga (ACK puro), DNS e ICMP no se limitan por defecto: retardarlos sube
   la latencia sin controlar nada. Se puede desactivar en Avanzado.
 - No hay límites por «grupo de aplicaciones» ni por interfaz de red (todavía).

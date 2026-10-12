@@ -200,20 +200,23 @@ vigilante (1)               comprueba que los hilos siguen vivos
 
 | Medición | Resultado |
 |----------|-----------|
-| Reenvío sin límites (mismo hilo, sin cola) | ~82 MB/s |
+| Reenvío sin límites (un hilo, un descriptor) | ~82 MB/s |
 | Pipeline con el descriptor falso (cola + hilos, sin driver) | 30 MB/s al 100 % del objetivo |
-| Reenvío **con límite activo** (dos hilos sobre el mismo descriptor) | ~12 MB/s |
+| Reenvío **con límite activo**, un descriptor (por defecto) | 2-5 MB/s con línea de 40 MB/s |
+| Reenvío **con límite activo**, descriptores separados (`LIMITADOR_SPLIT_HANDLES=1`) | 2-5 MB/s (misma sesión) |
 
-El pipeline de Python no es el cuello (sostiene 30 MB/s sin driver), así que la diferencia está
-en hablar con el driver a la vez desde el hilo de captura (`WinDivertRecv`) y el de inyección
-(`WinDivertSend`) sobre el **mismo descriptor**: el driver serializa ambas operaciones. El
-siguiente paso identificado es abrir un descriptor propio para inyectar (marcando los paquetes
-propios como *impostor* en el filtro de captura para que no se recapturen).
+Lo primero que se pensó fue que recv y send se serializaban en el mismo descriptor, así que se
+implementó y midió la separación (`tools\ab_handles.py`, alternando modos en la misma sesión y con
+el mismo espejo). **No mejora nada**: los dos modos dan lo mismo, así que el descriptor no es el
+cuello y la separación quedó como opción de diagnóstico, desactivada por defecto.
 
-Aparte, cuando el objetivo está muy por debajo de la línea, recortar exige descartar el exceso y
-TCP reacciona bajando su ritmo: la velocidad final puede quedar por debajo del objetivo sin que
-el limitador deje de aplicar el límite (se ve en `tools\rate_probe.py` y lo reporta como nota la
-prueba de aceptación).
+Lo que queda en pie: el pipeline de Python no es el cuello (30 MB/s sin driver) y el planificador
+tampoco (100 % de precisión en `tools\pacing_check.py`). La precisión depende de cuánto más rápida
+sea la línea que el objetivo: con ~26 MB/s de línea y un objetivo de ~9 MB/s el tráfico sale al
+87-105 % del objetivo; con líneas de 40-75 MB/s y objetivos de 8-22 MB/s la velocidad final se queda
+en unos pocos MB/s (el emisor se frena al perder los paquetes que hay que descartar). Siguiente paso
+identificado, aún sin probar: **retrasar ACK en vez de descartar datos**, que es la técnica que usan
+los limitadores comerciales para recortar una descarga sin hundir la conexión.
 
 ---
 

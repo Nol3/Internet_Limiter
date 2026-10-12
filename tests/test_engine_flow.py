@@ -11,6 +11,7 @@ and, like the real thing, hands packets over as ``memoryview``.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import queue
 import struct
@@ -89,6 +90,10 @@ class FakeHandle:
     def send(self, packet, recalculate_checksum: bool = True) -> int:
         if self.closed:
             raise OSError("handle closed")
+        if self.flags & Flag.RECV_ONLY:
+            # Igual que pydivert: si el motor intentara inyectar por un descriptor de captura,
+            # las pruebas deben fallar en vez de dar por bueno el diseño viejo.
+            raise OSError(errno.EACCES, "Handle is recv-only")
         if recalculate_checksum:
             self.checksum_recalcs += 1
         self.sent.append(packet)
@@ -114,6 +119,15 @@ class SocketOnlyHandle(FakeHandle):
     """Solo la capa SOCKET abre (la alternativa clásica)."""
 
     FAILING_LAYERS = frozenset({2})
+
+
+class NoSendHandleHandle(FakeHandle):
+    """No se puede abrir descriptor de inyección: hay que inyectar por el de captura."""
+
+    def open(self):
+        if self.flags & Flag.SEND_ONLY:
+            raise OSError(87, "El parámetro no es correcto.")
+        return super().open()
 
 
 def tcp_packet(
@@ -148,6 +162,11 @@ def build_engine(config: Config, factory=FakeHandle) -> Engine:
     return Engine(config, handle_factory=factory)
 
 
+def sent_handle(engine: Engine, direction: str = "out"):
+    """Descriptor por el que el motor inyecta (propio desde la separación captura/inyección)."""
+    return engine._send_handles[direction]
+
+
 def wait_until(predicate, timeout: float = 3.0, interval: float = 0.02) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -164,7 +183,7 @@ def test_all_captured_packets_are_reinjected(fake_driver):
     try:
         out_handle = engine._handles[0]
         out_handle.feed([tcp_packet("192.168.1.10", "8.8.8.8") for _ in range(20)])
-        assert wait_until(lambda: len(out_handle.sent) == 20), (
+        assert wait_until(lambda: len(sent_handle(engine).sent) == 20), (
             "no se reinyectaron todos los paquetes"
         )
         assert engine.is_running
@@ -181,8 +200,60 @@ def test_packets_are_reinjected_without_recalculating_checksums(fake_driver):
     try:
         out_handle = engine._handles[0]
         out_handle.feed([tcp_packet("192.168.1.10", "8.8.8.8") for _ in range(10)])
-        assert wait_until(lambda: len(out_handle.sent) == 10)
-        assert out_handle.checksum_recalcs == 0
+        assert wait_until(lambda: len(sent_handle(engine).sent) == 10)
+        assert sent_handle(engine).checksum_recalcs == 0
+    finally:
+        engine.stop()
+
+
+def test_by_default_capture_and_injection_share_one_handle(fake_driver):
+    """El comportamiento por defecto (y verificado) usa un solo descriptor por dirección.
+
+    Se probó a separarlos (opción LIMITADOR_SPLIT_HANDLES) y `tools\ab_handles.py` midió que no
+    mejora nada: ambos modos dan la misma velocidad. Por eso el defecto es el simple.
+    """
+    engine = build_engine(Config(settings=Settings(global_down_bps=1 * MB)))
+    engine.start()
+    try:
+        capture_out = engine._handles[0]
+        assert sent_handle(engine, "out") is capture_out
+        assert not (capture_out.flags & Flag.RECV_ONLY), "un solo descriptor debe poder enviar"
+        assert "not impostor" not in capture_out.filter
+    finally:
+        engine.stop()
+
+
+def test_split_handles_option_uses_read_and_write_only_handles(fake_driver, monkeypatch):
+    """Opción de diagnóstico: capturar e inyectar con descriptores separados."""
+    monkeypatch.setenv(engine_mod.SPLIT_HANDLES_ENV, "1")
+    engine = build_engine(Config(settings=Settings(global_down_bps=1 * MB)))
+    engine.start()
+    try:
+        capture_out, capture_in = engine._handles[0], engine._handles[1]
+        send_out, send_in = sent_handle(engine, "out"), sent_handle(engine, "in")
+        assert capture_out is not send_out, "la inyección necesita su propio descriptor"
+        assert capture_in is not send_in
+        assert capture_out.flags & Flag.RECV_ONLY, "el descriptor de captura solo debe leer"
+        assert send_out.flags & Flag.SEND_ONLY, "el descriptor de inyección solo debe escribir"
+        # El filtro de captura deja fuera lo que inyectamos (marca impostor) o se recapturaría.
+        assert "not impostor" in capture_out.filter
+    finally:
+        engine.stop()
+
+
+def test_falls_back_to_the_capture_handle_when_no_send_handle(fake_driver, monkeypatch):
+    """Con la opción activada, si no se puede abrir el descriptor de inyección se usa el de captura."""
+    monkeypatch.setenv(engine_mod.SPLIT_HANDLES_ENV, "1")
+    engine = build_engine(Config(settings=Settings(global_down_bps=1 * MB)), NoSendHandleHandle)
+    engine.start()
+    try:
+        capture_out = engine._handles[0]
+        assert sent_handle(engine, "out") is capture_out
+        assert not (capture_out.flags & Flag.RECV_ONLY), (
+            "sin descriptor propio hay que poder enviar"
+        )
+        capture_out.feed([tcp_packet("192.168.1.10", "8.8.8.8") for _ in range(5)])
+        assert wait_until(lambda: len(capture_out.sent) == 5), "no se reinyectó por el de captura"
     finally:
         engine.stop()
 
@@ -199,7 +270,7 @@ def test_parser_failure_still_forwards_every_packet(fake_driver, monkeypatch):
     try:
         out_handle = engine._handles[0]
         out_handle.feed([tcp_packet("192.168.1.10", "8.8.8.8") for _ in range(10)])
-        assert wait_until(lambda: len(out_handle.sent) == 10), (
+        assert wait_until(lambda: len(sent_handle(engine).sent) == 10), (
             "un fallo del analizador dejó paquetes atrapados (corte de internet)"
         )
         assert engine.is_running
@@ -217,7 +288,7 @@ def test_decision_failure_still_forwards_every_packet(fake_driver, monkeypatch):
     try:
         out_handle = engine._handles[0]
         out_handle.feed([tcp_packet("192.168.1.10", "8.8.8.8") for _ in range(10)])
-        assert wait_until(lambda: len(out_handle.sent) == 10)
+        assert wait_until(lambda: len(sent_handle(engine).sent) == 10)
     finally:
         engine.stop()
 
@@ -388,7 +459,7 @@ def test_below_the_limit_nothing_is_dropped_and_no_latency_is_added(fake_driver)
         packets = [tcp_packet("192.168.1.10", "8.8.8.8", payload=size - 40) for _ in range(200)]
         started = time.monotonic()
         feed_gradually(out_handle, packets, size / offered)
-        assert wait_until(lambda: len(out_handle.sent) == len(packets), timeout=10.0), (
+        assert wait_until(lambda: len(sent_handle(engine).sent) == len(packets), timeout=10.0), (
             "no se reinyectaron todos los paquetes ofrecidos por debajo del límite"
         )
         elapsed = time.monotonic() - started
@@ -417,12 +488,14 @@ def test_offered_load_above_the_limit_is_paced_to_the_limit(fake_driver):
         started = time.monotonic()
         feed_gradually(out_handle, packets, size / (3 * rate))  # offered load = 3x limit
         assert wait_until(
-            lambda: len(out_handle.sent) + engine.snapshot().dropped_packets >= len(packets),
+            lambda: (
+                len(sent_handle(engine).sent) + engine.snapshot().dropped_packets >= len(packets)
+            ),
             timeout=20.0,
         )
         elapsed = time.monotonic() - started
         snapshot = engine.snapshot()
-        sent = len(out_handle.sent)
+        sent = len(sent_handle(engine).sent)
         expected = sent * size / rate
         assert elapsed >= expected * 0.7, f"se envió más rápido que el límite ({elapsed:.3f}s)"
         assert snapshot.dropped_packets > 0, "un exceso sostenido debe descartar el sobrante"
@@ -442,13 +515,14 @@ def test_stop_flushes_queued_packets_instead_of_dropping_them(fake_driver):
     )
     engine.start()
     out_handle = engine._handles[0]
+    sender = sent_handle(engine)  # antes de parar: al parar se cierran y se olvidan
     packets = [tcp_packet("192.168.1.10", "8.8.8.8", payload=1440) for _ in range(60)]
     out_handle.feed(packets)
-    assert wait_until(lambda: len(out_handle.sent) > 0, timeout=3.0)
-    partial = len(out_handle.sent)
+    assert wait_until(lambda: len(sender.sent) > 0, timeout=3.0)
+    partial = len(sender.sent)
     assert partial < len(packets), "el limitador no estaba reteniendo nada que vaciar"
     engine.stop()
-    assert len(out_handle.sent) == len(packets), (
+    assert len(sender.sent) == len(packets), (
         "al detenerse deben reinyectarse los paquetes que estaban en cola"
     )
     assert engine.is_running is False
@@ -465,7 +539,7 @@ def test_per_application_rule_uses_its_own_shaper(fake_driver, monkeypatch):
     try:
         out_handle = engine._handles[0]
         out_handle.feed([tcp_packet("192.168.1.10", "8.8.8.8", payload=200) for _ in range(5)])
-        assert wait_until(lambda: len(out_handle.sent) == 5, timeout=5.0)
+        assert wait_until(lambda: len(sent_handle(engine).sent) == 5, timeout=5.0)
         snapshot = engine.snapshot()
         # El nombre del planificador lleva la ruta normalizada y la dirección.
         expected_key = f"app:{Config.normalise_exe(DEMO_EXE)}:out"

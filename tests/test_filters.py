@@ -120,6 +120,21 @@ def test_disabling_lan_exclusion_captures_local_traffic_too():
     assert evaluates_to(filt, ipv4_tcp("192.168.1.10", "192.168.1.20"), outbound=True) is True
 
 
+def test_capture_filter_leaves_out_our_own_injected_packets():
+    """Con descriptores separados para capturar e inyectar, lo inyectado no debe recapturarse.
+
+    Se apoya en la marca *impostor* del driver. Sin ella, cada paquete reinyectado volvería a
+    entrar por el descriptor de captura: un bucle.
+    """
+    for direction in ("outbound", "inbound"):
+        filt = build_network_filter(direction, exclude_own=True)
+        assert "not impostor" in filt
+        ok, message = validate_filter(filt)
+        assert ok, message
+    # Por defecto no se excluye nada: con un solo descriptor el driver ya evita la recaptura.
+    assert "not impostor" not in build_network_filter("outbound")
+
+
 def test_event_layer_filters_compile_for_their_own_layers():
     """La atribución por proceso depende de que estos filtros compilen en su capa.
 

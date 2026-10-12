@@ -55,6 +55,7 @@ def build_network_filter(
     *,
     exclude_lan: bool = True,
     excluded_blocks: tuple[tuple[str, str], ...] = DEFAULT_EXCLUDED_BLOCKS,
+    exclude_own: bool = False,
 ) -> str:
     """Kernel filter for one direction of the network layer.
 
@@ -62,8 +63,14 @@ def build_network_filter(
     excluding local networks, multicast and broadcast. IPv6 packets match the IPv4
     address conditions vacuously (``ip.DstAddr`` is false for them), which is what we
     want: they are captured and the per-family decision is made in user space.
+
+    ``exclude_own`` deja fuera los paquetes que hemos inyectado nosotros (marca *impostor*).
+    Solo hace falta con descriptores separados para capturar e inyectar (si no, lo reinyectado
+    volvería a entrar por el de captura: un bucle); con un solo descriptor el driver ya lo evita.
     """
     parts = [direction, "not loopback"]
+    if exclude_own:
+        parts.append("not impostor")
     if exclude_lan:
         field = remote_field(direction)
         parts.extend(_exclude_block_expr(field, lo, hi) for lo, hi in excluded_blocks)

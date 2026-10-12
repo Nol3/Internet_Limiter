@@ -36,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -88,6 +89,12 @@ EVENT_CLOSED_CODES = {
     "flow": frozenset({EVENT_FLOW_DELETED}),
     "socket": frozenset({EVENT_SOCKET_CLOSE}),
 }
+
+#: Opción de diagnóstico: ``LIMITADOR_SPLIT_HANDLES=1`` abre un descriptor aparte para inyectar.
+#: Por defecto va **desactivada**: se midió con `tools\ab_handles.py` que separar los descriptores
+#: no mejora la velocidad (ambos modos dan lo mismo), así que se mantiene la arquitectura simple
+#: y verificada. La opción queda para seguir investigando el techo de velocidad.
+SPLIT_HANDLES_ENV = "LIMITADOR_SPLIT_HANDLES"
 
 #: Capas de eventos de WinDivert, por orden de preferencia: la primera que abra, se usa.
 #: FLOW es la ideal (entrega el ProcessId de cada flujo en cuanto se establece); SOCKET es
@@ -232,6 +239,8 @@ class Engine:
         self._started_at = 0.0
         self._errors: list[str] = []
         self._handles: list[object] = []
+        #: Descriptores de solo escritura, uno por dirección, para inyectar (ver _open_handles).
+        self._send_handles: dict[str, object] = {}
         self._capture_threads: dict[str, threading.Thread] = {}
         self._inject_threads: dict[str, threading.Thread] = {}
         self._event_thread: threading.Thread | None = None
@@ -431,12 +440,29 @@ class Engine:
 
     def _open_handles(self) -> None:
         settings = self.config.settings
+        split_handles = os.environ.get(SPLIT_HANDLES_ENV) == "1"
         try:
-            for _direction, real in (("out", "outbound"), ("in", "inbound")):
+            for direction, real in (("out", "outbound"), ("in", "inbound")):
                 filt = build_network_filter(real, exclude_lan=settings.exclude_lan)
-                handle = self._handle_factory(filt, Layer.NETWORK)
+                send_handle = None
+                if split_handles:
+                    # Modo de diagnóstico: descriptor propio (solo escritura) para inyectar y uno
+                    # de solo lectura para capturar. El filtro de captura excluye lo que inyectamos
+                    # (marca *impostor*) para no recapturarlo en bucle.
+                    filt = build_network_filter(
+                        real, exclude_lan=settings.exclude_lan, exclude_own=True
+                    )
+                    try:
+                        candidate = self._handle_factory(filt, Layer.NETWORK, 0, Flag.SEND_ONLY)
+                        candidate.open()
+                        send_handle = candidate
+                    except Exception as exc:
+                        log.warning("sin descriptor de inyección en %s (%s)", direction, exc)
+                flags = Flag.DEFAULT if send_handle is None else Flag.RECV_ONLY
+                handle = self._handle_factory(filt, Layer.NETWORK, 0, flags)
                 handle.open()
                 self._handles.append(handle)
+                self._send_handles[direction] = send_handle or handle
         except OSError as exc:
             self._close_handles()
             winerror = getattr(exc, "winerror", None)
@@ -452,6 +478,11 @@ class Engine:
             raise LimiterError(f"No se pudo abrir la captura de paquetes: {exc}") from exc
 
     def _close_handles(self) -> None:
+        for _direction, handle in list(self._send_handles.items()):
+            if handle not in self._handles:  # no cerrar dos veces el mismo descriptor
+                with contextlib.suppress(Exception):
+                    handle.close()
+        self._send_handles.clear()
         while self._handles:
             handle = self._handles.pop()
             with contextlib.suppress(Exception):
@@ -564,14 +595,15 @@ class Engine:
     def _capture_loop(self, direction: str) -> None:
         """Receive, decide, reinject. Never dies holding a packet."""
         try:
-            handle = self._handles[0 if direction == "out" else 1]
+            capture = self._handles[0 if direction == "out" else 1]
+            handle = self._send_handles.get(direction) or capture
         except IndexError:  # pragma: no cover - defensive
             return
         outbound = direction == "out"
         consecutive_errors = 0
         while self._running:
             try:
-                packet = handle.recv()
+                packet = capture.recv()
                 consecutive_errors = 0
             except Exception as exc:
                 if not self._running:
@@ -642,7 +674,9 @@ class Engine:
 
     def _inject_loop(self, direction: str) -> None:
         try:
-            handle = self._handles[0 if direction == "out" else 1]
+            handle = (
+                self._send_handles.get(direction) or self._handles[0 if direction == "out" else 1]
+            )
         except IndexError:  # pragma: no cover - defensive
             return
         queue = self._queues[direction]

@@ -61,6 +61,13 @@ Esta versión se ha verificado contra la red real.
   velocidad de línea, los descartes propios son pequeños) y el pipeline de Python sostiene 30 MB/s
   con el descriptor falso, así que el techo está en la interacción captura/inyección con el driver
   (dos hilos sobre el mismo descriptor), no en la lógica del planificador.
+- **`tools\ab_handles.py`**: A/B de descriptores (uno solo frente a captura/inyección separadas)
+  alternando modos en la misma sesión, para que el estado del espejo no se confunda con el efecto
+  del cambio. Sirve para medir cualquier cambio de arquitectura de la captura.
+- **Resultado negativo, y por eso está documentado**: separar los descriptores (que era la hipótesis
+  del techo) **no mejora la velocidad** — ambos modos dan lo mismo en la misma sesión. La opción
+  queda detrás de `LIMITADOR_SPLIT_HANDLES=1` y el defecto vuelve a ser el descriptor único
+  verificado. Siguiente hipótesis: retrasar ACK en vez de descartar datos.
 - **Monitor por aplicación** en vivo (bajada/subida por proceso) y lista de apps con conexiones.
 - **Fail-open garantizado**: el camino por paquete no puede lanzar excepciones; un hilo vigilante
   libera la captura si un hilo del motor muere; la cola se vacía al detener en lugar de descartarse.

@@ -19,6 +19,7 @@ Uso:
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -63,7 +64,7 @@ def install_watchdog(seconds: float) -> None:
     threading.Thread(target=kill, daemon=True).start()
 
 
-def download(seconds: float) -> float:
+def download(seconds: float, url: str = URL) -> float:
     """Velocidad media (MB/s) de una descarga real."""
     cmd = [
         CURL,
@@ -74,7 +75,7 @@ def download(seconds: float) -> float:
         str(seconds),
         "-w",
         "%{speed_download}",
-        URL,
+        url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=seconds + 30, check=False)
     try:
@@ -88,10 +89,15 @@ def main() -> int:
     if not driver.is_admin():
         print("Necesita administrador.", file=sys.stderr)
         return 1
-    driver.prepare()
-    install_watchdog(len(CASES) * (SECONDS + 4) + 90)
+    parser = argparse.ArgumentParser(description="Velocidad real con varias tasas y retardos.")
+    parser.add_argument("--url", default=URL, help="espejo a usar")
+    parser.add_argument("--seconds", type=float, default=SECONDS, help="segundos por caso")
+    args = parser.parse_args()
 
-    print(f"Espejo: {URL}  ·  {SECONDS:.0f}s por caso\n")
+    driver.prepare()
+    install_watchdog(len(CASES) * (args.seconds + 4) + 90)
+
+    print(f"Espejo: {args.url}  ·  {args.seconds:.0f}s por caso\n")
     print(
         f"{'objetivo':>9} {'retardo':>8} {'archivo':>9} {'motor':>9} {'planificador':>13}"
         f" {'%obj':>5} {'descartes':>10} {'cola':>8} {'ret.máx':>8}"
@@ -108,13 +114,13 @@ def main() -> int:
         engine = Engine(config)
         engine.start()
         try:
-            measured = download(SECONDS)
+            measured = download(args.seconds, args.url)
             snapshot = engine.snapshot()
             shaper = snapshot.shapers.get("global:in", {})
-            released = float(shaper.get("sent_bytes", 0)) / MB / SECONDS
+            released = float(shaper.get("sent_bytes", 0)) / MB / args.seconds
             print(
                 f"{target:>7.1f}M {delay:>7.1f}m {measured:>8.2f}M "
-                f"{snapshot.bytes_down / MB / SECONDS:>8.2f}M {released:>12.2f}M "
+                f"{snapshot.bytes_down / MB / args.seconds:>8.2f}M {released:>12.2f}M "
                 f"{measured / target:>4.0%} {snapshot.dropped_packets:>10} "
                 f"{snapshot.queued_down / MB:>7.2f}M "
                 f"{float(shaper.get('max_observed_delay_ms', 0)):>7.1f}m"
