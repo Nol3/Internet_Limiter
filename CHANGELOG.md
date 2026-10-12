@@ -17,18 +17,25 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 - **Medición de latencia** (`limitador/latency.py`): ping ICMP real vía `IcmpSendEcho`, **sin
   privilegios de administrador**; medio, pico, jitter y pérdida, con monitor en hilo. Se muestra
   en la pestaña *General* y con `--latency HOST` en la consola.
-- `tools/latency_probe.py`: mide el ping en cuatro situaciones (reposo, carga sin limitador, modo
-  juego, descriptores separados) con una descarga de fondo real, y dice cuántos ms añade o quita
-  cada una.
+- `tools/latency_probe.py`: mide el ping en cinco situaciones (reposo, carga sin el motor, motor
+  capturando sin límites, modo juego con recorte suave y con recorte agresivo) con una descarga de
+  fondo real, y dice cuántos ms añade o quita cada una.
 
 ### Corregido
-- **El limitador añadía latencia bajo carga**: medido en hardware real, +57 ms de ping (y +95 ms
-  con descriptores separados) mientras una descarga llenaba el enlace. El inyector se despertaba
-  una vez por paquete (~15.000 despertares/s a 20 MB/s) y el tira y afloja del GIL retrasaba los
-  paquetes de control. Ahora la cola avisa solo al pasar de vacía a tener algo, el inyector drena
-  en ráfaga y el AQM cuenta los bytes en vuelo.
-- Descartada la vía de descriptores separados para capturar e inyectar: empeoraba la latencia
-  (+95 ms frente a +57 ms) además de no mejorar el caudal.
+- **Menos traspasos entre hilos**: la cola avisa solo al pasar de vacía a tener algo y el inyector
+  drena en ráfaga (`MAX_INJECT_BURST`), con el AQM contando los bytes en vuelo. Se despertaba al
+  inyector una vez por paquete (~15.000 despertares/s a 20 MB/s). Medido: **no basta para quitar
+  la latencia añadida** (ver *Conocido*).
+- Descartada la vía de descriptores separados para capturar e inyectar: no mejoraba el caudal y
+  empeoraba o igualaba la latencia (medido dos veces, en sentidos opuestos).
+
+### Conocido (medido, sin resolver)
+- **El motor añade ~82 ms de ping bajo una descarga a tope**, incluso sin ningún límite puesto
+  (16 ms en reposo → 98 ms). El coste es por paquete (recibir, parsear, atribuir y reinyectar en
+  Python, ~30.000 paquetes/s) en la cola FIFO del driver, delante de los paquetes del juego. No es
+  el recorte ni los descartes: se midió con recorte suave, agresivo y sin límite. El camino de
+  arreglo está identificado (reducir el coste por paquete y excluir los puertos del juego del
+  filtro de captura) y **no está implementado**.
 
 
 ## [2.0.0] — 2026-10-12

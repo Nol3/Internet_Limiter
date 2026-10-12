@@ -50,6 +50,8 @@ URL = "https://fra.download.datapacket.com/1000mb.bin"
 LINE_SECONDS = 5.0
 #: El recorte del modo juego: se deja un margen para que la cola no se llene nunca.
 GAME_CAP_FRACTION = 0.85
+#: Recorte suave: el uso correcto del modo juego (no obliga a descartar).
+GENTLE_CAP_FRACTION = 0.95
 
 
 def install_watchdog(seconds: float) -> None:
@@ -170,21 +172,40 @@ def main() -> int:
         engine=engine,
     )
 
-    # Cuarta fase: lo mismo con descriptores separados para capturar e inyectar. La sospecha es
-    # que los paquetes de control (ACK, ICMP) esperan a que el hilo de inyección suelte el
-    # descriptor que ambos comparten.
-    os.environ[SPLIT_HANDLES_ENV] = "1"
-    engine_split = Engine(config)
-    try:
-        split = phase(
-            "4. con carga, modo juego + descriptores separados",
-            args.host,
-            args.seconds,
-            load=load,
-            engine=engine_split,
+    # Quinta fase: el MISMO modo juego pero con un recorte suave (justo por debajo de la línea).
+    # La diferencia con la fase 3 es la clave: recortar muy por debajo de lo que el servidor
+    # entrega obliga a descartar, TCP retransmite y el caudal de paquetes que entra SUBE, con la
+    # cola del driver (FIFO) delante de los paquetes de control.
+    gentle_cap = max(line * GENTLE_CAP_FRACTION, 0.5)
+    gentle_config = Config(
+        settings=Settings(
+            global_down_bps=int(gentle_cap * MB),
+            global_up_bps=int(gentle_cap * MB),
+            max_delay_ms=GAME_MODE_MAX_DELAY_MS,
+            game_mode=True,
         )
-    finally:
-        os.environ.pop(SPLIT_HANDLES_ENV, None)
+    )
+    engine_gentle = Engine(gentle_config)
+    gentle = phase(
+        f"5. con carga, modo juego con recorte suave ({gentle_cap:.1f} MB/s)",
+        args.host,
+        args.seconds,
+        load=load,
+        engine=engine_gentle,
+    )
+
+    # Prueba decisiva: el motor capturando y reinyectando SIN ningún límite. Separa "el motor
+    # está en el camino" de "el motor está limitando": si el ping también se dispara aquí, el
+    # coste es del propio motor (CPU/GIL por paquete), no del recorte.
+    plain_config = Config(settings=Settings())
+    engine_plain = Engine(plain_config)
+    passthrough = phase(
+        "4. con carga, motor capturando SIN límites",
+        args.host,
+        args.seconds,
+        load=load,
+        engine=engine_plain,
+    )
 
     print("\n" + "=" * 62)
     print("  QUÉ HA PASADO")
@@ -200,29 +221,50 @@ def main() -> int:
         f"({limited.avg_ms - base:+.0f} ms)"
     )
     print(
-        f"  con carga, modo juego (separados):         {split.avg_ms:6.0f} ms  "
-        f"({split.avg_ms - base:+.0f} ms)"
+        f"  con carga, motor sin límites:              {passthrough.avg_ms:6.0f} ms  "
+        f"({passthrough.avg_ms - base:+.0f} ms)"
     )
     print(
-        f"  pico peor: sin limitar {loaded.max_ms:.0f} / un descriptor {limited.max_ms:.0f} / "
-        f"separados {split.max_ms:.0f} ms"
+        f"  pico peor: sin motor {loaded.max_ms:.0f} / motor sin límites {passthrough.max_ms:.0f} / "
+        f"modo juego {limited.max_ms:.0f} ms"
     )
     print(
-        f"  jitter:    sin limitar {loaded.jitter_ms:.0f} / un descriptor "
-        f"{limited.jitter_ms:.0f} / separados {split.jitter_ms:.0f} ms"
+        f"  jitter:    sin motor {loaded.jitter_ms:.0f} / motor sin límites "
+        f"{passthrough.jitter_ms:.0f} / modo juego {limited.jitter_ms:.0f} ms"
     )
 
-    best = min(limited.avg_ms, split.avg_ms)
+    print(
+        f"  con carga, modo juego suave:               {gentle.avg_ms:6.0f} ms  "
+        f"({gentle.avg_ms - base:+.0f} ms)"
+    )
+    best = min(limited.avg_ms, gentle.avg_ms)
     reference = max(loaded.avg_ms, idle.avg_ms)
-    if best <= reference + 5:
+    if passthrough.avg_ms > reference + 20:
+        print(
+            f"\n  RESULTADO: el coste está en el MOTOR, no en el recorte. Sin ningún límite, solo"
+        )
+        print(
+            f"             capturando y reinyectando, el ping sube a {passthrough.avg_ms:.0f} ms "
+            f"({passthrough.avg_ms - base:+.0f} ms)."
+        )
+        print("             Cada paquete pasa por Python (parseo + atribución + cola) y con una")
+        print("             descarga a tope ese coste por paquete se pone delante de tus paquetes.")
+    elif gentle.avg_ms + 10 < limited.avg_ms:
+        print(
+            f"\n  RESULTADO: la clave es CUÁNTO recortas: {gentle.avg_ms:.0f} ms con recorte suave "
+            f"frente a {limited.avg_ms:.0f} ms"
+        )
+        print(
+            "             con recorte agresivo (los descartes hacen retransmitir a TCP y suben el"
+        )
+        print("             caudal de paquetes que entra). Recorta un 5-15%, no a la mitad.")
+    elif best <= reference + 5:
         print("\n  RESULTADO: el limitador no añade latencia apreciable bajo carga.")
     else:
         print(
             f"\n  RESULTADO: bajo carga el limitador añade {best - reference:.0f} ms de más "
             "(eso es lo que hay que corregir)."
         )
-        print("             Compara las dos últimas filas: si la de descriptores separados es")
-        print("             claramente mejor, el arreglo es no compartir descriptor.")
     if loaded.avg_ms > idle.avg_ms + 20:
         print("\n  NOTA: esta línea SÍ tiene bufferbloat (el ping sube con carga sin limitar):")
         print("        ahí el recorte del modo juego es lo que lo corrige.")

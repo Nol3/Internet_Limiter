@@ -159,20 +159,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\run_elevated.ps1 ^
     -Script latency_probe.py -ScriptArgs "--host 1.1.1.1 --seconds 6"
 ```
 
-Cuatro situaciones, con una descarga de fondo real en las tres últimas:
+Cinco situaciones, con una descarga de fondo real en las cuatro últimas:
 
 1. **En reposo** - tu ping de referencia.
-2. **Con carga, sin limitador** - aquí se ve el bufferbloat de tu línea, si lo tiene.
-3. **Con carga y modo juego** - el tráfico de fondo se recorta y el presupuesto de retardo baja
-   a 20 ms.
-4. **Con carga y descriptores separados** - control del diseño: sirvió para descartar esa vía
-   (empeoraba la latencia).
+2. **Con carga, sin el limitador** - aquí se ve el bufferbloat de tu línea, si lo tiene.
+3. **Con carga, motor capturando sin ningún límite** - la fase decisiva: separa "el motor está en
+   el camino" de "el motor está limitando".
+4. **Con carga y modo juego con recorte suave** (95 % de la línea).
+5. **Con carga y modo juego con recorte agresivo** (85 %).
 
-El informe final compara las cuatro y dice cuántos ms añade o quita cada configuración. Y en la
-app, el *modo juego* + *Prioridad (no limitar)* sobre tu juego es lo que se deja puesto mientras
-juegas.
+El informe final compara las cinco y dice cuántos ms añade o quita cada configuración.
 
-> Medición real de referencia en este equipo (línea sin bufferbloat, 17 ms en reposo): sin
-> limitador el ping no subía (+0 ms) y el limitador **sí** añadía latencia (+57 ms), por el
-> traspaso entre hilos por paquete. Ese defecto es el que corrigió el drenaje en ráfaga; la
-> tabla del [README](README.md#para-juegos-menos-ms-más-estables) lleva los números.
+> **Medición real de referencia en este equipo** (línea sin bufferbloat, 16 ms en reposo):
+> sin el limitador el ping no se movía (16 → 17 ms), y el motor **sí** añadía latencia: 98 ms
+> incluso **sin ningún límite puesto** (+82 ms), 103 ms con recorte suave y 112-138 ms con recorte
+> agresivo. Es decir, el coste está en el motor (cada paquete pasa por Python, ~30.000
+> paquetes/s, en la cola FIFO del driver), no en el recorte. La tabla del
+> [README](README.md#lo-que-se-midió-aquí-y-lo-que-obligó-a-corregir) lleva los números y la línea
+> de arreglo.

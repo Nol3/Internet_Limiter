@@ -66,25 +66,35 @@ añade o quita cada configuración, en lugar de pedirte que te lo creas.
 
 ### Lo que se midió aquí (y lo que obligó a corregir)
 
+Medido en esta línea (Windows 11 x64, descarga de fondo de 1 GB desde un espejo, 8 s por fase):
+
 | situación | ping medio | respecto al reposo |
 |---|---|---|
-| en reposo | 17 ms | — |
-| con carga, **sin** limitador | 17 ms | +0 ms |
-| con carga, modo juego (un descriptor) | 73 ms | **+57 ms** |
-| con carga, modo juego (descriptores separados) | 112 ms | **+95 ms** |
+| en reposo | 16 ms | — |
+| con carga, **sin** el limitador | 17 ms | +1 ms |
+| con carga, motor capturando **sin ningún límite** | 98 ms | **+82 ms** |
+| con carga, modo juego con recorte suave (95 %) | 103 ms | +87 ms |
+| con carga, modo juego con recorte agresivo (85 %) | 112-138 ms | +96-122 ms |
 
-Dos conclusiones honestas de esta medición en esta línea:
+Tres conclusiones honestas:
 
-- **Esta línea no tenía bufferbloat** con esa descarga (17 → 17 ms): el recorte del modo juego no
-  era lo que hacía falta aquí, y sin embargo…
-- **el limitador añadía 57-95 ms de ping bajo carga**. Es decir, hacía lo contrario de lo que
-  promete el proyecto. La causa: el inyector se despertaba **una vez por paquete** (~15.000
-  despertares/s con una descarga a 20 MB/s) y ese tira y afloja del GIL le robaba CPU al hilo que
-  debe reenviar al instante tu tráfico sensible.
+- **Esta línea no tenía *bufferbloat*** con esa descarga: sin el limitador, el ping no se movía
+  (16 → 17 ms). El recorte del modo juego, aquí, no era lo que hacía falta.
+- **El coste está en el motor, no en el recorte.** Con el motor capturando y reinyectando **sin
+  ningún límite** el ping ya sube a 98 ms. Cada paquete pasa por Python (recibir, parsear,
+  atribuir a un proceso, reinyectar) y a ~30.000 paquetes/s ese trabajo se pone delante de tus
+  paquetes en la cola del driver, que es FIFO. No es el recorte, ni los descartes, ni el tamaño
+  del recorte, ni los descriptores separados: todo eso se midió y se descartó.
+- Es decir: el limitador **controla bien el caudal** (verificado al 87-97 % del objetivo) pero
+  **hoy no puede prometer bajar el ping mientras limita un caudal alto**. Mientras juegas, sin
+  descargas de fondo, el coste es despreciable (16 ms en reposo, con el motor o sin él); el
+  problema aparece justo cuando el limitador tiene trabajo que hacer.
 
-Corregido en esta versión: la cola avisa solo al pasar de vacía a tener algo y el inyector drena
-en ráfaga (`MAX_INJECT_BURST`), contando el AQM los bytes en vuelo. La medida con descriptores
-separados (peor: +95 ms) confirma además que esa vía no era el camino y quedó descartada.
+La siguiente línea de trabajo está identificada y es de arquitectura, no un ajuste: **reducir el
+coste por paquete** y, sobre todo, **dejar el tráfico del juego fuera de la captura** (excluir
+sus puertos en el filtro del driver en cuanto se conocen), que es lo único que garantiza por
+construcción que no pueda ser retrasado. Hasta entonces, la promesa del proyecto es el control
+del caudal y la prioridad lógica, no una mejora del ping medida.
 
 ### Verificado en hardware real
 
