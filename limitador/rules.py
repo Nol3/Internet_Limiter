@@ -30,19 +30,42 @@ def log_path() -> Path:
     return appdata_dir() / "limitador.log"
 
 
+#: Presupuesto de retardo del modo juego: cuanto menos se pueda encolar, menos sube el ping.
+GAME_MODE_MAX_DELAY_MS = 20.0
+
+#: Objetivo de latencia por defecto del modo juego. Para jugar de verdad, pon la IP del
+#: servidor al que te conectas: es la única medida que importa.
+DEFAULT_LATENCY_HOST = "1.1.1.1"
+
+
 @dataclass
 class AppRule:
-    """Per-application limit. ``exe`` is the normalised full image path."""
+    """Per-application rule. ``exe`` is the normalised full image path.
+
+    Tres formas de usarla:
+
+    * ``down_bps``/``up_bps`` > 0: límite propio de esa aplicación (manda sobre el global).
+    * ``exempt=True``: **nunca se limita**, ni con un límite global puesto. Es la prioridad
+      absoluta que necesita un juego: su tráfico no espera en la cola, así que su ping no sube
+      porque otra cosa esté llenando el enlace.
+    * sin tasas ni exención: la regla existe pero no hace nada (queda inactiva).
+    """
 
     exe: str
     name: str = ""
     down_bps: float = 0.0
     up_bps: float = 0.0
     enabled: bool = True
+    exempt: bool = False
 
     @property
     def has_limit(self) -> bool:
         return self.enabled and (self.down_bps > 0 or self.up_bps > 0)
+
+    @property
+    def is_priority(self) -> bool:
+        """True si esta aplicación tiene prioridad absoluta (no se limita nunca)."""
+        return self.enabled and self.exempt
 
     @property
     def display_name(self) -> str:
@@ -62,6 +85,10 @@ class Settings:
     minimize_to_tray: bool = True
     autostart: bool = False
     start_on_launch: bool = False  # begin limiting as soon as the app opens
+    # --- perfil de juego (el motivo del proyecto: menos ms, más estables) ---
+    game_mode: bool = False  # presupuesto de retardo corto: el ping no se dispara
+    monitor_latency: bool = False  # medir el RTT mientras se limita
+    latency_host: str = DEFAULT_LATENCY_HOST  # a quién se mide (idealmente, tu servidor)
 
     def clamp(self) -> None:
         self.global_down_bps = max(0.0, float(self.global_down_bps))
@@ -71,6 +98,17 @@ class Settings:
     @property
     def has_global_limit(self) -> bool:
         return self.global_down_bps > 0 or self.global_up_bps > 0
+
+    @property
+    def effective_max_delay_ms(self) -> float:
+        """Presupuesto de retardo en uso: el del modo juego manda si está activo.
+
+        Es la palanca que ataca el *bufferbloat*: cuanto menos pueda encolarse, menos sube el
+        ping cuando algo llena el enlace.
+        """
+        if self.game_mode:
+            return min(self.max_delay_ms, GAME_MODE_MAX_DELAY_MS)
+        return self.max_delay_ms
 
 
 @dataclass
@@ -117,8 +155,17 @@ class Config:
             return len(self.rules) != before
 
     def active_rules(self) -> list[AppRule]:
+        """Reglas que crean un planificador propio (las exentas no limitan: no crean ninguno)."""
         with self._lock:
-            return [r for r in self.rules if r.has_limit]
+            return [r for r in self.rules if r.has_limit and not r.exempt]
+
+    def priority_rules(self) -> list[AppRule]:
+        """Reglas con prioridad absoluta: su tráfico nunca pasa por el planificador."""
+        with self._lock:
+            return [r for r in self.rules if r.is_priority]
+
+    def priority_exes(self) -> list[str]:
+        return [self.normalise_exe(r.exe) for r in self.priority_rules()]
 
     # ---------------------------------------------------------------------- disk
     def to_dict(self) -> dict:

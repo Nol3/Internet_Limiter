@@ -26,7 +26,7 @@ from . import driver
 from .console import ensure_utf8_console
 from .engine import Engine, LimiterError
 from .procmap import ProcessMap
-from .rules import AppRule, Config, Settings
+from .rules import DEFAULT_LATENCY_HOST, AppRule, Config, Settings
 from .units import format_bytes, format_rate, parse_rate
 
 #: Muestras mínimas para poder descartar la de arranque.
@@ -76,6 +76,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit-lan", action="store_true", help="limitar también el tráfico de la red local"
     )
     parser.add_argument("--no-ipv6", action="store_true", help="no limitar IPv6")
+    parser.add_argument(
+        "--exempt",
+        action="append",
+        default=[],
+        metavar="RUTA",
+        help="aplicación con prioridad absoluta: nunca se limita (repetible). Para juegos.",
+    )
+    parser.add_argument(
+        "--game-mode",
+        action="store_true",
+        help="perfil de juego: presupuesto de retardo corto (menos bufferbloat)",
+    )
+    parser.add_argument(
+        "--latency",
+        type=str,
+        default="",
+        metavar="HOST",
+        help="mide el ping a HOST durante la sesión y lo informa (idealmente, tu servidor)",
+    )
     parser.add_argument("--check", action="store_true", help="solo diagnóstico, no limita")
     parser.add_argument("--list-apps", action="store_true", help="listar apps con conexiones")
     parser.add_argument(
@@ -127,10 +146,16 @@ def config_from_args(args: argparse.Namespace) -> Config:
         exempt_control=not args.no_control_exemption,
         exclude_lan=not args.limit_lan,
         limit_ipv6=not args.no_ipv6,
+        game_mode=bool(getattr(args, "game_mode", False)),
+        monitor_latency=bool(getattr(args, "latency", "")),
+        latency_host=getattr(args, "latency", "") or DEFAULT_LATENCY_HOST,
     )
     config = Config(settings=settings)
     for rule in parse_app_specs(args.app, args.unit):
         config.set_rule(rule)
+    for path in getattr(args, "exempt", []):
+        # Prioridad absoluta: para el juego. Manda sobre cualquier límite, también el global.
+        config.set_rule(AppRule(exe=str(Path(path).resolve()), exempt=True))
     return config
 
 

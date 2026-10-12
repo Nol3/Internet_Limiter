@@ -1,5 +1,12 @@
 # Limitador
 
+> **Bajar los ms y estabilizar el ping en juegos competitivos.** Ese es el motivo del proyecto.
+>
+> El limitador es la herramienta, no el objetivo. Tu tráfico de fondo (descargas, copias,
+> streaming, actualizaciones) llena la cola de tu enlace y eso se siente como *bufferbloat*: el
+> ping sube, hay tirones, el hit no registra. Limitando el fondo y dando **prioridad absoluta al
+> juego**, tu tráfico sensible no espera en esa cola.
+>
 > Limitador de ancho de banda para Windows: **por aplicación** o para **todo el equipo**.
 > Una alternativa simple, libre y gratuita a NetLimiter. Sin tocar el router, sin drivers
 > propios firmados, sin cuentas ni telemetría.
@@ -20,10 +27,64 @@
   un backup…) y deja el resto del equipo sin tocar.
 - **Límite global**: limita todo el tráfico del equipo de una vez.
 - **Monitor en vivo**: qué aplicaciones están usando la red y a qué velocidad, en MB/s.
+- **Modo juego**: presupuesto de retardo corto (20 ms) para que el ping no se dispare, más
+  **prioridad absoluta** para las aplicaciones que marques: su tráfico no pasa por la cola.
+- **Medición de latencia**: ping real (ICMP) a tu servidor de juego, con medio, pico y jitter,
+  para comprobar el efecto en lugar de suponerlo.
 - **Latencia controlada (AQM)**: no llena la cola del enlace; el retardo añadido está acotado
   por un presupuesto configurable (50 ms por defecto) en lugar de provocar *bufferbloat*.
 - **Reglas persistentes**: las reglas por aplicación se guardan y se aplican solas.
 - **Bandeja del sistema, inicio con Windows (sin UAC), modo consola, diagnóstico.**
+
+## Para juegos: menos ms, más estables
+
+El *bufferbloat* es el ping que sube cuando algo llena tu enlace. No se nota en la velocidad
+(que sigue siendo alta) sino en los milisegundos, y en un juego competitivo se siente como
+tirones o como que el hit no registra. La causa no es el router: es que **tu propio tráfico de
+fondo** ocupa la cola del enlace y tu paquete del juego espera detrás.
+
+El proyecto nació para eso, y lo atacan dos piezas:
+
+1. **Modo juego** (pestaña *General*, o `--game-mode`): baja el presupuesto de retardo de 50 ms a
+   20 ms. La cola del enlace no puede crecer: lo que sobra se descarta antes (AQM) en lugar de
+   acumularse esperando. Menos cola = menos ping.
+2. **Prioridad absoluta** (pestaña *Aplicaciones* → *Prioridad (no limitar)*, o `--exempt RUTA`):
+   el juego marcado así **no pasa por el planificador ni por el límite global**. Su tráfico sale
+   en cuanto llega, aunque otra aplicación esté descargando a tope.
+
+### Compruébalo con tus números
+
+```bat
+:: apuntando a TU servidor de juego (no al de otro)
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\run_elevated.ps1 ^
+    -Script latency_probe.py -ScriptArgs "--host 1.1.1.1 --seconds 6"
+```
+
+Mide el ping en cuatro situaciones con una descarga de fondo real: en reposo, con carga sin
+limitador, con carga y modo juego, y con carga y descriptores separados. Te dice cuántos ms
+añade o quita cada configuración, en lugar de pedirte que te lo creas.
+
+### Lo que se midió aquí (y lo que obligó a corregir)
+
+| situación | ping medio | respecto al reposo |
+|---|---|---|
+| en reposo | 17 ms | — |
+| con carga, **sin** limitador | 17 ms | +0 ms |
+| con carga, modo juego (un descriptor) | 73 ms | **+57 ms** |
+| con carga, modo juego (descriptores separados) | 112 ms | **+95 ms** |
+
+Dos conclusiones honestas de esta medición en esta línea:
+
+- **Esta línea no tenía bufferbloat** con esa descarga (17 → 17 ms): el recorte del modo juego no
+  era lo que hacía falta aquí, y sin embargo…
+- **el limitador añadía 57-95 ms de ping bajo carga**. Es decir, hacía lo contrario de lo que
+  promete el proyecto. La causa: el inyector se despertaba **una vez por paquete** (~15.000
+  despertares/s con una descarga a 20 MB/s) y ese tira y afloja del GIL le robaba CPU al hilo que
+  debe reenviar al instante tu tráfico sensible.
+
+Corregido en esta versión: la cola avisa solo al pasar de vacía a tener algo y el inyector drena
+en ráfaga (`MAX_INJECT_BURST`), contando el AQM los bytes en vuelo. La medida con descriptores
+separados (peor: +95 ms) confirma además que esa vía no era el camino y quedó descartada.
 
 ### Verificado en hardware real
 

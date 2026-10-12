@@ -23,7 +23,7 @@ from pydivert.consts import Flag, Layer
 
 from limitador import engine as engine_mod
 from limitador.engine import Engine
-from limitador.rules import AppRule, Config, Settings
+from limitador.rules import GAME_MODE_MAX_DELAY_MS, AppRule, Config, Settings
 
 MB = 1024 * 1024
 DEMO_EXE = r"C:\test\demo.exe"
@@ -545,5 +545,87 @@ def test_per_application_rule_uses_its_own_shaper(fake_driver, monkeypatch):
         expected_key = f"app:{Config.normalise_exe(DEMO_EXE)}:out"
         assert expected_key in snapshot.shapers
         assert snapshot.per_pid.get(4321, (0, 0))[0] > 0
+    finally:
+        engine.stop()
+
+
+def _priority_setup(engine, monkeypatch):
+    monkeypatch.setattr(engine.procmap, "pid_for", lambda *_a, **_k: 4321)
+    monkeypatch.setattr(engine.procmap, "path_for", lambda *_a, **_k: DEMO_EXE)
+
+
+def test_priority_rule_is_never_limited(fake_driver, monkeypatch):
+    """El juego (regla de prioridad) no espera en la cola ni con un límite global puesto.
+
+    Es la base del modo juego: si el tráfico del juego se encolara detrás del de fondo, su ping
+    subiría igual aunque el de fondo esté limitado.
+    """
+    config = Config(settings=Settings(global_down_bps=64 * 1024, global_up_bps=64 * 1024))
+    config.set_rule(AppRule(exe=DEMO_EXE, exempt=True))
+    engine = build_engine(config)
+    _priority_setup(engine, monkeypatch)
+    engine.start()
+    try:
+        handle = engine._handles[0]
+        packets = [tcp_packet("192.168.1.10", "8.8.8.8", payload=1440) for _ in range(20)]
+        started = time.monotonic()
+        handle.feed(packets)
+        assert wait_until(lambda: len(sent_handle(engine).sent) == 20, timeout=5.0), (
+            "el tráfico prioritario se quedó esperando"
+        )
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.3, f"el tráfico prioritario se retrasó ({elapsed:.2f}s)"
+        snapshot = engine.snapshot()
+        assert snapshot.dropped_packets == 0
+        assert not [k for k in snapshot.shapers if k.startswith("app:")], (
+            "una regla de prioridad no debe crear planificador"
+        )
+    finally:
+        engine.stop()
+
+
+def test_without_priority_the_same_traffic_goes_through_the_shaper(fake_driver, monkeypatch):
+    """Control del test anterior: sin prioridad, ese mismo tráfico sí pasa por el planificador.
+
+    No se comprueba que se envíen los 20 paquetes (con un límite tan bajo el AQM descarta el
+    sobrante, que es lo correcto), sino que el planificador los retrasa o los descarta: eso es
+    justo lo que la regla de prioridad evita.
+    """
+    config = Config(settings=Settings(global_down_bps=64 * 1024, global_up_bps=64 * 1024))
+    engine = build_engine(config)
+    _priority_setup(engine, monkeypatch)
+    engine.start()
+    try:
+        handle = engine._handles[0]
+        handle.feed([tcp_packet("192.168.1.10", "8.8.8.8", payload=1440) for _ in range(20)])
+
+        def went_through_the_shaper() -> bool:
+            snapshot = engine.snapshot()
+            shaper = snapshot.shapers.get("global:out", {})
+            return float(shaper.get("delayed_packets", 0)) > 0 or snapshot.dropped_packets > 0
+
+        assert wait_until(went_through_the_shaper, timeout=5.0), (
+            "sin prioridad el tráfico tiene que pasar por el planificador"
+        )
+    finally:
+        engine.stop()
+
+
+def test_game_mode_shortens_the_delay_budget(fake_driver):
+    """El modo juego baja el presupuesto de retardo: es lo que ataca el bufferbloat."""
+    config = Config(
+        settings=Settings(
+            global_down_bps=1 * MB,
+            global_up_bps=1 * MB,
+            max_delay_ms=50.0,
+            game_mode=True,
+        )
+    )
+    engine = build_engine(config)
+    engine.start()
+    try:
+        assert config.settings.effective_max_delay_ms == GAME_MODE_MAX_DELAY_MS
+        for name, shaper in engine.snapshot().shapers.items():
+            assert float(shaper["max_delay_ms"]) <= GAME_MODE_MAX_DELAY_MS + 0.01, name
     finally:
         engine.stop()

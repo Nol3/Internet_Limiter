@@ -63,6 +63,8 @@ log = logging.getLogger(__name__)
 MB = 1024 * 1024
 MIN_QUEUE_BYTES = 2 * MB
 MAX_QUEUE_BYTES = 16 * MB
+#: Cuántos paquetes saca el inyector de una vez (menos traspasos entre hilos = menos latencia).
+MAX_INJECT_BURST = 64
 MAX_CONSECUTIVE_RECV_ERRORS = 20
 #: ERROR_ACCESS_DENIED de la API de Windows.
 ERROR_ACCESS_DENIED = 5
@@ -142,10 +144,25 @@ class _ByteQueue:
             if self._bytes + size > self.max_bytes:
                 self.overflows += 1
                 return False
+            was_empty = not self._items
             self._items.append((item, size))
             self._bytes += size
-            self._cv.notify()
+            # Solo se despierta al inyector cuando la cola estaba vacía: avisar por paquete
+            # costaba ~15.000 despertares por segundo con una descarga a 20 MB/s, y ese tira y
+            # afloja del GIL es lo que retrasaba los paquetes de control (medido: +57 ms de ping
+            # bajo carga). El inyector, una vez despierto, vacía todo lo que haya.
+            if was_empty:
+                self._cv.notify()
             return True
+
+    def get_nowait(self) -> tuple[object, int] | None:
+        """Saca un elemento sin esperar (``None`` si no hay nada)."""
+        with self._cv:
+            if not self._items:
+                return None
+            item, size = self._items.popleft()
+            self._bytes -= size
+            return item, size
 
     def get(self, timeout: float) -> tuple[object, int] | None:
         with self._cv:
@@ -506,11 +523,11 @@ class Engine:
                 index = (key, direction)
             shaper = table.get(index)
             if shaper is None:
-                shaper = Shaper(rate, self.config.settings.max_delay_ms)
+                shaper = Shaper(rate, self.config.settings.effective_max_delay_ms)
                 table[index] = shaper
             else:
                 shaper.set_rate(rate)
-                shaper.set_max_delay(self.config.settings.max_delay_ms)
+                shaper.set_max_delay(self.config.settings.effective_max_delay_ms)
             return shaper
 
     def _sync_shapers(self) -> None:
@@ -523,7 +540,9 @@ class Engine:
                     ("out", settings.global_up_bps),
                 ):
                     if rate > 0:
-                        self._global_shapers[direction] = Shaper(rate, settings.max_delay_ms)
+                        self._global_shapers[direction] = Shaper(
+                            rate, settings.effective_max_delay_ms
+                        )
             for direction in ("in", "out"):
                 shaper = self._global_shapers.get(direction)
                 rate = self._rate_for(direction, None)
@@ -531,7 +550,7 @@ class Engine:
                     self._global_shapers.pop(direction, None)
                 elif shaper and rate > 0:
                     shaper.set_rate(rate)
-                    shaper.set_max_delay(settings.max_delay_ms)
+                    shaper.set_max_delay(settings.effective_max_delay_ms)
             active_keys = set()
             for rule in self.config.active_rules():
                 for direction in ("in", "out"):
@@ -584,7 +603,8 @@ class Engine:
         if cached and now - cached[0] < RULE_CACHE_TTL_SECONDS:
             return cached[1]
         rule = self.config.rule_for_exe(self.procmap.path_for(pid))
-        if rule is not None and not rule.has_limit:
+        if rule is not None and not rule.has_limit and not rule.is_priority:
+            # Sin tasas y sin prioridad: la regla existe pero no decide nada.
             rule = None
         self._pid_rule_cache[pid] = (now, rule)
         if len(self._pid_rule_cache) > MAX_CACHED_PIDS:
@@ -662,6 +682,10 @@ class Engine:
 
     def _select_shaper(self, direction: str, pid: int | None) -> Shaper | None:
         rule = self._rule_for_pid(pid) if pid else None
+        if rule is not None and rule.is_priority:
+            # Prioridad absoluta (el juego): su tráfico sale ya, sin cola y sin límite global.
+            # Es lo que mantiene el ping bajo mientras otra aplicación llena el enlace.
+            return None
         rate = self._rate_for(direction, rule)
         if rate <= 0:
             # No per-app limit: fall back to the PC-wide limit, if any.
@@ -686,26 +710,39 @@ class Engine:
                 if not self._running:
                     break
                 continue
-            payload, size = item
-            packet, shaper, _info = payload
-            try:
-                if self._paused or not self._running or self._released:
-                    # Flush: never hold packets hostage while shutting down or paused.
+            # Se vacía en ráfaga lo que haya: despertar al hilo una vez por paquete era lo que
+            # añadía latencia a los paquetes de control (que comparten CPU con este bucle).
+            batch = [item]
+            while len(batch) < MAX_INJECT_BURST:
+                more = queue.get_nowait()
+                if more is None:
+                    break
+                batch.append(more)
+            # 'pending' son los bytes que van en esta ráfaga y aún no se han enviado: cuentan
+            # como cola para el AQM, igual que contaban cuando se sacaba de uno en uno.
+            pending = sum(item_size for _payload, item_size in batch)
+            for payload, size in batch:
+                packet, shaper, _info = payload
+                try:
+                    if self._paused or not self._running or self._released:
+                        # Flush: never hold packets hostage while shutting down or paused.
+                        pending -= size
+                        self._send(handle, packet)
+                        continue
+                    allow, wait = shaper.plan(size, queue.bytes + pending)
+                    pending -= size
+                    if not allow:
+                        shaper.note_dropped(size)
+                        self._dropped[direction] += size
+                        self._dropped_packets += 1
+                        continue
+                    if wait > 0:
+                        shaper.wait(wait)
                     self._send(handle, packet)
-                    continue
-                allow, wait = shaper.plan(size, queue.bytes)
-                if not allow:
-                    shaper.note_dropped(size)
-                    self._dropped[direction] += size
-                    self._dropped_packets += 1
-                    continue
-                if wait > 0:
-                    shaper.wait(wait)
-                self._send(handle, packet)
-                shaper.note_sent(size, wait)
-            except Exception as exc:
-                self._note_error(f"error inyectando en {direction}: {exc!r}")
-                self._send(handle, packet)
+                    shaper.note_sent(size, wait)
+                except Exception as exc:
+                    self._note_error(f"error inyectando en {direction}: {exc!r}")
+                    self._send(handle, packet)
 
     def _send(self, handle, packet) -> None:
         """Reinject a packet, telling pydivert not to recompute its checksums.

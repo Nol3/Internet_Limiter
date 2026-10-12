@@ -7,6 +7,30 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 
 ---
 
+## [Sin publicar]
+
+### Añadido
+- **Perfil de juego**, el motivo del proyecto: ajuste *Modo juego* que baja el presupuesto de
+  retardo a 20 ms, y **reglas de prioridad** (`AppRule.exempt`) cuyo tráfico no pasa ni por el
+  planificador ni por el límite global. Botón *Prioridad (no limitar)* en la pestaña
+  *Aplicaciones*; `--exempt RUTA` y `--game-mode` en la consola.
+- **Medición de latencia** (`limitador/latency.py`): ping ICMP real vía `IcmpSendEcho`, **sin
+  privilegios de administrador**; medio, pico, jitter y pérdida, con monitor en hilo. Se muestra
+  en la pestaña *General* y con `--latency HOST` en la consola.
+- `tools/latency_probe.py`: mide el ping en cuatro situaciones (reposo, carga sin limitador, modo
+  juego, descriptores separados) con una descarga de fondo real, y dice cuántos ms añade o quita
+  cada una.
+
+### Corregido
+- **El limitador añadía latencia bajo carga**: medido en hardware real, +57 ms de ping (y +95 ms
+  con descriptores separados) mientras una descarga llenaba el enlace. El inyector se despertaba
+  una vez por paquete (~15.000 despertares/s a 20 MB/s) y el tira y afloja del GIL retrasaba los
+  paquetes de control. Ahora la cola avisa solo al pasar de vacía a tener algo, el inyector drena
+  en ráfaga y el AQM cuenta los bytes en vuelo.
+- Descartada la vía de descriptores separados para capturar e inyectar: empeoraba la latencia
+  (+95 ms frente a +57 ms) además de no mejorar el caudal.
+
+
 ## [2.0.0] — 2026-10-12
 
 Reescritura del motor. La 1.0.0 no limitaba nada: su filtro de captura no compilaba y su

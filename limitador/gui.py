@@ -24,8 +24,16 @@ from tkinter import messagebox, ttk
 
 from . import autostart, driver
 from .engine import Engine, EngineEvent, LimiterError, Snapshot
+from .latency import LatencyMonitor
 from .procmap import ProcessMap
-from .rules import APP_VERSION, AppRule, Config, log_path
+from .rules import (
+    APP_VERSION,
+    DEFAULT_LATENCY_HOST,
+    GAME_MODE_MAX_DELAY_MS,
+    AppRule,
+    Config,
+    log_path,
+)
 from .units import UNITS, format_bytes, format_duration, format_rate, parse_rate, to_display
 
 BG = "#1e1e1e"
@@ -64,6 +72,7 @@ class LimitadorApp(tk.Tk):
         self.log_lines: queue.Queue[str] = queue.Queue(maxsize=500)
         self.engine = Engine(self.config_data, on_event=self.events.put)
         self.pmap = ProcessMap(poll_interval=2.0)
+        self.latency = LatencyMonitor(host=config.settings.latency_host)
         self._snapshot: Snapshot | None = None
         self._previous: Snapshot | None = None
         self._previous_time = time.monotonic()
@@ -87,6 +96,8 @@ class LimitadorApp(tk.Tk):
         logging.getLogger("limitador").addHandler(_LogHandler(self.log_lines))
         self.pmap.refresh()
         self._sync_widgets_from_config()
+        if self.config_data.settings.monitor_latency:
+            self.latency.start()
         self._start_tray()
         self.after(250, self._drain_events)
         self.after(1000, self._refresh_loop)
@@ -242,6 +253,41 @@ class LimitadorApp(tk.Tk):
             style="Muted.TLabel",
         ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
+        # --- perfil de juego: el motivo del proyecto (menos ms, más estables) ---
+        gaming = ttk.LabelFrame(tab, text="Juego y latencia", padding=8)
+        gaming.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        self.game_mode_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            gaming,
+            text=f"Modo juego: presupuesto de {GAME_MODE_MAX_DELAY_MS:.0f} ms, "
+            "para que el ping no se dispare cuando algo descarga",
+            variable=self.game_mode_var,
+            command=self._on_game_mode,
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+        self.monitor_latency_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            gaming,
+            text="Medir latencia a",
+            variable=self.monitor_latency_var,
+            command=self._on_latency_toggle,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.latency_host_var = tk.StringVar(value=DEFAULT_LATENCY_HOST)
+        host_entry = ttk.Entry(gaming, textvariable=self.latency_host_var, width=18)
+        host_entry.grid(row=1, column=1, sticky="w", padx=6, pady=(6, 0))
+        ttk.Button(gaming, text="Aplicar", width=8, command=self._on_latency_host).grid(
+            row=1, column=2, sticky="w", pady=(6, 0)
+        )
+        self.latency_var = tk.StringVar(value="Latencia: sin medir")
+        ttk.Label(gaming, textvariable=self.latency_var, style="Muted.TLabel").grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0)
+        )
+        ttk.Label(
+            gaming,
+            text="Pon la IP del servidor al que juegas: es la única medida que importa.",
+            style="Muted.TLabel",
+        ).grid(row=3, column=0, columnspan=4, sticky="w")
+        host_entry.bind("<Return>", lambda _e: self._on_latency_host())
+
     def _build_apps_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook, padding=10)
         notebook.add(tab, text="Aplicaciones")
@@ -281,6 +327,9 @@ class LimitadorApp(tk.Tk):
         self.limit_btn.pack(side="left")
         ttk.Button(row, text="Quitar límite", command=self._remove_limit).pack(side="left", padx=6)
         ttk.Button(row, text="Refrescar ahora", command=self._refresh_apps).pack(side="left")
+        ttk.Button(row, text="Prioridad (no limitar)", command=self._mark_priority).pack(
+            side="left", padx=6
+        )
 
         self.only_active = tk.BooleanVar(value=True)
         ttk.Checkbutton(
@@ -426,6 +475,9 @@ class LimitadorApp(tk.Tk):
         self.tray_var.set(settings.minimize_to_tray)
         self.autostart_var.set(autostart.is_enabled())
         self.autostart_on_launch_var.set(settings.start_on_launch)
+        self.game_mode_var.set(settings.game_mode)
+        self.monitor_latency_var.set(settings.monitor_latency)
+        self.latency_host_var.set(settings.latency_host)
 
     def _apply_global(self) -> None:
         try:
@@ -478,6 +530,59 @@ class LimitadorApp(tk.Tk):
             messagebox.showerror("Inicio con Windows", message, parent=self)
             self.autostart_var.set(not want)
         logging.getLogger("limitador").info("autostart: %s", message)
+
+    def _on_game_mode(self) -> None:
+        """El perfil de juego: presupuesto de retardo corto (menos bufferbloat)."""
+        self.config_data.settings.game_mode = bool(self.game_mode_var.get())
+        self._commit_settings()
+
+    def _on_latency_toggle(self) -> None:
+        self.config_data.settings.monitor_latency = bool(self.monitor_latency_var.get())
+        if self.config_data.settings.monitor_latency:
+            self.latency.start()
+        else:
+            self.latency.stop()
+            self.latency_var.set("Latencia: sin medir")
+        self._commit_settings()
+
+    def _on_latency_host(self) -> None:
+        host = self.latency_host_var.get().strip() or DEFAULT_LATENCY_HOST
+        self.latency_host_var.set(host)
+        self.config_data.settings.latency_host = host
+        self.latency.stop()
+        self.latency = LatencyMonitor(host=host)
+        if self.config_data.settings.monitor_latency:
+            self.latency.start()
+        self._commit_settings()
+
+    def _mark_priority(self) -> None:
+        """Marca la aplicación seleccionada como prioridad: no se limita nunca.
+
+        Es lo que se le hace al juego: su tráfico no espera en la cola, así que su ping no sube
+        porque otra cosa esté llenando el enlace.
+        """
+        selection = self.apps_tree.selection()
+        if not selection:
+            messagebox.showinfo("Aplicaciones", "Selecciona primero una aplicación.", parent=self)
+            return
+        pid = self._app_rows.get(selection[0])
+        exe = self.pmap.path_for(pid) if pid else None
+        if not exe:
+            messagebox.showinfo(
+                "Aplicaciones",
+                "Esa fila no tiene un ejecutable asociado (¿la app ya no está en ejecución?).",
+                parent=self,
+            )
+            return
+        self.config_data.set_rule(
+            AppRule(exe=exe, name=self.pmap.name_for(pid) if pid else "", exempt=True)
+        )
+        self.engine.apply_config()
+        try:
+            self.config_data.save()
+        except OSError as exc:  # pragma: no cover
+            logging.getLogger("limitador").warning("no se pudo guardar: %s", exc)
+        self._refresh_apps()
 
     def _commit_settings(self) -> None:
         self.config_data.settings.clamp()
@@ -587,6 +692,8 @@ class LimitadorApp(tk.Tk):
             self._update_app_rates(snapshot, span)
         self._previous, self._previous_time = snapshot, now
         self._snapshot = snapshot
+        if self.config_data.settings.monitor_latency:
+            self.latency_var.set(self.latency.stats().line())
         self._draw_graph()
         settings = self.config_data.settings
         self.total_var.set(
@@ -653,7 +760,14 @@ class LimitadorApp(tk.Tk):
             rule = rules_by_exe.get(self.config_data.normalise_exe(exe or ""))
             if rule:
                 matched_rules.add(self.config_data.normalise_exe(rule.exe))
-            state = "limitada" if (rule and rule.has_limit) else ("regla inactiva" if rule else "")
+            if rule is not None and rule.is_priority:
+                state = "prioridad"
+            elif rule and rule.has_limit:
+                state = "limitada"
+            elif rule:
+                state = "regla inactiva"
+            else:
+                state = ""
             item = self.apps_tree.insert(
                 "",
                 "end",
@@ -668,7 +782,11 @@ class LimitadorApp(tk.Tk):
                     format_rate(rule.up_bps) if rule and rule.up_bps else "—",
                     state,
                 ),
-                tags=("limited",) if state == "limitada" else (),
+                tags=("priority",)
+                if state == "prioridad"
+                else ("limited",)
+                if state == "limitada"
+                else (),
             )
             self._app_rows[item] = pid
 
@@ -703,6 +821,7 @@ class LimitadorApp(tk.Tk):
                 "Atribución: tabla de conexiones (hasta 1 s de retardo en flujos nuevos)"
             )
         self.apps_tree.tag_configure("limited", foreground=ACCENT)
+        self.apps_tree.tag_configure("priority", foreground=ACCENT_WARM)
         if selected is not None:
             for item, pid in self._app_rows.items():
                 if pid == selected:
@@ -987,6 +1106,7 @@ class LimitadorApp(tk.Tk):
             return
         self._closing = True
         try:
+            self.latency.stop()
             self.engine.stop()
         finally:
             if self._tray is not None:
