@@ -39,8 +39,9 @@ ignore = [
 "main.py" = ["E402"]
 "tools/*" = ["E402", "T201", "S603", "S607", "PLR2004"]
 "tests/*" = ["S101", "PLR2004", "ARG001", "ARG002", "ARG005"]
-# La interfaz define widgets y textos largos: valores literales de layout y umbrales.
-"limitador/gui.py" = ["ARG002", "PLW0603", "PLR2004", "SIM105"]
+# La interfaz define widgets y textos largos: valores literales de layout y umbrales. Los
+# ayudantes locales que rellenan una fila de la tabla reciben una columna por argumento.
+"limitador/gui.py" = ["ARG002", "PLW0603", "PLR2004", "SIM105", "PLR0913", "PLR0917"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["limitador"]

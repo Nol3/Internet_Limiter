@@ -55,7 +55,7 @@ Capturas generadas por la propia aplicación (`Limitador.exe --screenshot docs\i
 | General | Aplicaciones |
 |---------|--------------|
 | ![Pestaña General](docs/img/gui-general.png) | ![Pestaña Aplicaciones](docs/img/gui-aplicaciones.png) |
-| Límite de todo el equipo, en caliente | Qué app consume qué, y su límite propio |
+| Límite de todo el equipo, en caliente | Qué app consume qué **y cuánto lleva consumido**, con su límite propio |
 
 | Avanzado | Registro |
 |----------|----------|

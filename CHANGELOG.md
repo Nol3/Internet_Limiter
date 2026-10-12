@@ -68,7 +68,9 @@ Esta versión se ha verificado contra la red real.
   del techo) **no mejora la velocidad** — ambos modos dan lo mismo en la misma sesión. La opción
   queda detrás de `LIMITADOR_SPLIT_HANDLES=1` y el defecto vuelve a ser el descriptor único
   verificado. Siguiente hipótesis: retrasar ACK en vez de descartar datos.
-- **Monitor por aplicación** en vivo (bajada/subida por proceso) y lista de apps con conexiones.
+- **Monitor por aplicación** en vivo (bajada/subida por proceso) y lista de apps con conexiones,
+  con el **total acumulado** por aplicación desde que se inicia la limitación (o desde el último
+  «Reiniciar contadores»).
 - **Fail-open garantizado**: el camino por paquete no puede lanzar excepciones; un hilo vigilante
   libera la captura si un hilo del motor muere; la cola se vacía al detener en lugar de descartarse.
 - **Autocomprobación del analizador** antes de abrir el primer descriptor: un analizador roto

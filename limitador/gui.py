@@ -246,16 +246,28 @@ class LimitadorApp(tk.Tk):
         tab = ttk.Frame(notebook, padding=10)
         notebook.add(tab, text="Aplicaciones")
 
-        columns = ("app", "pid", "down", "up", "limit_down", "limit_up", "state")
+        columns = (
+            "app",
+            "pid",
+            "down",
+            "up",
+            "total_down",
+            "total_up",
+            "limit_down",
+            "limit_up",
+            "state",
+        )
         self.apps_tree = ttk.Treeview(tab, columns=columns, show="headings", height=11)
         headings = {
-            "app": ("Aplicación", 190),
-            "pid": ("PID", 55),
-            "down": ("↓ ahora", 80),
-            "up": ("↑ ahora", 80),
-            "limit_down": ("Límite ↓", 80),
-            "limit_up": ("Límite ↑", 80),
-            "state": ("Estado", 90),
+            "app": ("Aplicación", 140),
+            "pid": ("PID", 45),
+            "down": ("↓ ahora", 65),
+            "up": ("↑ ahora", 65),
+            "total_down": ("↓ total", 75),
+            "total_up": ("↑ total", 75),
+            "limit_down": ("Límite ↓", 65),
+            "limit_up": ("Límite ↑", 65),
+            "state": ("Estado", 75),
         }
         for key, (text, width) in headings.items():
             self.apps_tree.heading(key, text=text)
@@ -288,6 +300,12 @@ class LimitadorApp(tk.Tk):
             textvariable=self.attribution_var,
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(
+            tab,
+            text="Los totales cuentan desde que se inicia la limitación (o desde el último "
+            "«Reiniciar contadores»).",
+            style="Muted.TLabel",
+        ).pack(anchor="w")
 
     def _build_advanced_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook, padding=14)
@@ -623,7 +641,15 @@ class LimitadorApp(tk.Tk):
         rules_by_exe = {self.config_data.normalise_exe(r.exe): r for r in self.config_data.rules}
         matched_rules: set[str] = set()
 
-        def add_row(pid: int | None, name: str, exe: str | None, down: float, up: float) -> None:
+        def add_row(
+            pid: int | None,
+            name: str,
+            exe: str | None,
+            down: float,
+            up: float,
+            total_down: int = 0,
+            total_up: int = 0,
+        ) -> None:
             rule = rules_by_exe.get(self.config_data.normalise_exe(exe or ""))
             if rule:
                 matched_rules.add(self.config_data.normalise_exe(rule.exe))
@@ -632,10 +658,12 @@ class LimitadorApp(tk.Tk):
                 "",
                 "end",
                 values=(
-                    name[:44],
+                    name[:30],
                     pid if pid else "—",
                     format_rate(down) if down else "—",
                     format_rate(up) if up else "—",
+                    format_bytes(total_down) if total_down else "—",
+                    format_bytes(total_up) if total_up else "—",
                     format_rate(rule.down_bps) if rule and rule.down_bps else "—",
                     format_rate(rule.up_bps) if rule and rule.up_bps else "—",
                     state,
@@ -654,7 +682,8 @@ class LimitadorApp(tk.Tk):
             rule_here = rules_by_exe.get(self.config_data.normalise_exe(exe or ""))
             if only_active and not down and not up and rule_here is None:
                 continue
-            add_row(pid, self.pmap.name_for(pid), exe, down, up)
+            totals = snapshot.per_pid.get(pid, (0, 0)) if snapshot is not None else (0, 0)
+            add_row(pid, self.pmap.name_for(pid), exe, down, up, totals[0], totals[1])
             shown += 1
 
         for rule in self.config_data.rules:  # rules for apps that are not running now
