@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .filters import DEFAULT_EXCLUDED_BLOCKS, IPV6_EXCLUDED_PREFIXES
 
@@ -64,6 +64,38 @@ EXCLUDED_V6: tuple[ipaddress.IPv6Network, ...] = tuple(
 )
 
 
+#: Los mismos rangos locales que ``EXCLUDED_V4``, como (red, máscara) enteros.
+EXCLUDED_V4_INT: tuple[tuple[int, int], ...] = tuple(
+    (int(net.network_address), int(net.netmask)) for net in EXCLUDED_V4
+)
+
+
+def is_local_v4_int(addr: int) -> bool:
+    """Versión rápida para IPv4 del filtro de LAN, sin construir objetos.
+
+    Mismos rangos que ``EXCLUDED_V4`` (la fuente de verdad, y lo que usa el filtro del kernel),
+    pero en enteros: en el camino por paquete esto es una decena de operaciones frente a construir
+    dos objetos y parsear texto (~2,4 us, el 42 % del coste medido). ``tests/test_classify.py``
+    comprueba que ambos caminos coinciden, para que no puedan divergir.
+    """
+    return addr == BROADCAST_V4 or any(addr >> shift == prefix for shift, prefix in _LOCAL_V4)
+
+
+#: Rangos locales como (bits a desplazar, prefijo esperado). Mismos rangos que ``EXCLUDED_V4``,
+#: que sigue siendo la fuente de verdad; ``test_classify`` comprueba que ambos coinciden.
+_LOCAL_V4: tuple[tuple[int, int], ...] = (
+    (24, 127),  # 127.0.0.0/8
+    (24, 10),  # 10.0.0.0/8
+    (20, 0xAC1),  # 172.16.0.0/12
+    (16, 0xC0A8),  # 192.168.0.0/16
+    (16, 0xA9FE),  # 169.254.0.0/16
+    (28, 0xE),  # 224.0.0.0/4
+)
+
+#: 255.255.255.255 (broadcast limitado).
+BROADCAST_V4 = 0xFFFFFFFF
+
+
 def is_local_remote(addr: str) -> bool:
     """True if this *remote* address belongs to a local/never-throttled range.
 
@@ -89,10 +121,21 @@ class PacketInfo:
     proto: int
     local_port: int  # -1 when unknown (non-first fragment)
     remote_port: int
-    remote_addr: str
+    #: Dirección remota como entero (4 o 16 bytes en orden de red). Guardarla así evita
+    #: construir objetos por paquete; el texto se calcula solo si alguien lo pide.
+    remote_int: int
     size: int  # bytes on the wire (IP total length as captured)
     payload_len: int  # transport payload (0 for pure ACKs)
     tcp_flags: int
+    #: Caché perezosa del texto de ``remote_int``.
+    _remote_text: str | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def remote_addr(self) -> str:
+        """Dirección remota en texto (se calcula la primera vez que se pide)."""
+        if self._remote_text is None:
+            self._remote_text = _format_addr(self.version, self.remote_int)
+        return self._remote_text
 
     @property
     def is_tcp(self) -> bool:
@@ -120,24 +163,40 @@ class PacketInfo:
 
     @property
     def is_local_remote(self) -> bool:
-        return is_local_remote(self.remote_addr)
+        """True si la dirección remota es local (LAN, loopback, multicast...)."""
+        if self.version == VERSION_4:
+            return is_local_v4_int(self.remote_int)
+        return is_local_remote(self.remote_addr)  # IPv6: raro, aquí no compensa
 
     def describe(self) -> str:
         d = "out" if self.outbound else "in"
         return f"{d} ipv{self.version} proto={self.proto} :{self.local_port} -> {self.remote_addr}:{self.remote_port}"
 
 
-def _addr_v4(raw) -> tuple[str, str]:
-    # struct.unpack_from works on both bytes and memoryview. Slicing a memoryview with
-    # ``raw[12:16]`` returns another memoryview, which IPv4Address cannot parse - that is
-    # exactly the bug that blackholed the traffic once (packets arrive as memoryview).
-    src, dst = struct.unpack_from("!4s4s", raw, 12)
-    return str(ipaddress.IPv4Address(src)), str(ipaddress.IPv4Address(dst))
+def _addr_v4(raw) -> tuple[int, int]:
+    """Direcciones IPv4 como enteros, sin construir objetos.
+
+    Antes se creaban dos ``IPv4Address`` y se pasaban a texto en *cada* paquete, y el filtro de
+    LAN volvía a parsear ese texto: ~2,4 us por paquete, el 42 % del camino (medido con
+    ``tools/packet_bench.py``). Para decidir basta el entero.
+
+    ``struct.unpack_from`` funciona con ``bytes`` y con ``memoryview``. Rebanar un memoryview
+    (``raw[12:16]``) devuelve otro memoryview, que ``IPv4Address`` no sabe parsear: ese fue el
+    fallo que una vez dejó al usuario sin internet (los paquetes llegan como memoryview).
+    """
+    src, dst = struct.unpack_from("!II", raw, 12)
+    return src, dst
 
 
-def _addr_v6(raw) -> tuple[str, str]:
+def _addr_v6(raw) -> tuple[int, int]:
     src, dst = struct.unpack_from("!16s16s", raw, 8)
-    return str(ipaddress.IPv6Address(src)), str(ipaddress.IPv6Address(dst))
+    return int.from_bytes(src, "big"), int.from_bytes(dst, "big")
+
+
+def _format_addr(version: int, value: int) -> str:
+    if version == VERSION_4:
+        return str(ipaddress.IPv4Address(value))
+    return str(ipaddress.IPv6Address(value))
 
 
 def inspect(raw: bytes | memoryview, outbound: bool) -> PacketInfo | None:
@@ -238,7 +297,7 @@ def inspect(raw: bytes | memoryview, outbound: bool) -> PacketInfo | None:
         proto=proto,
         local_port=local_port,
         remote_port=remote_port,
-        remote_addr=dst if outbound else src,
+        remote_int=dst if outbound else src,
         size=size,
         payload_len=payload_len,
         tcp_flags=tcp_flags,

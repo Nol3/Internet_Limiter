@@ -21,6 +21,7 @@ from limitador.filters import (
     build_flow_filter,
     build_network_filter,
     build_socket_filter,
+    port_clause,
     validate_filter,
 )
 
@@ -147,3 +148,91 @@ def test_event_layer_filters_compile_for_their_own_layers():
     ):
         ok, message = validate_filter(filter_string, layer)
         assert ok, f"{layer.name}: {message}"
+
+
+def test_port_scope_filters_compile():
+    """Las cláusulas de puertos tienen que compilar con el compilador del driver."""
+    for direction in ("inbound", "outbound"):
+        for kwargs in (
+            {"only_ports": (443, 8443)},
+            {"exclude_ports": (51000, 51001)},
+            {"only_ports": (443,), "exclude_ports": (51000,)},
+        ):
+            ok, message = validate_filter(build_network_filter(direction, **kwargs))
+            assert ok, f"{kwargs}: {message}"
+
+
+def test_capture_nothing_filter_compiles():
+    """El alcance "limited" sin nada que limitar usa ``false``: tiene que ser un filtro válido."""
+    ok, message = validate_filter("false")
+    assert ok, message
+
+
+def test_only_ports_captures_just_that_traffic():
+    """Con solo estos puertos, el tráfico de otros puertos no entra en el motor."""
+    filt = build_network_filter("outbound", exclude_lan=False, only_ports=(443,))
+    assert evaluates_to(filt, ipv4_tcp("192.168.1.10", "8.8.8.8", dport=443), True) is True
+    assert evaluates_to(filt, ipv4_tcp("192.168.1.10", "8.8.8.8", dport=80), True) is False
+
+
+def test_excluded_ports_leave_that_traffic_alone():
+    """Los puertos con prioridad no se capturan: su tráfico no puede ser retrasado."""
+    filt = build_network_filter("outbound", exclude_lan=False, exclude_ports=(51000,))
+    assert evaluates_to(filt, ipv4_tcp("192.168.1.10", "8.8.8.8", sport=51000), True) is False
+    assert evaluates_to(filt, ipv4_tcp("192.168.1.10", "8.8.8.8", sport=52000), True) is True
+
+
+def test_port_negation_avoids_not_parenthesis_and_guards_protocols():
+    """La exclusión de puertos se escribe con De Morgan y con guardas de protocolo.
+
+    Sin las guardas, ``not tcp.SrcPort == X`` descarta también paquetes de otros protocolos
+    (el campo vale 0 y la negación se evalúa como ``(not 0) == X``). Medido con el evaluador
+    del driver; este test lo fija para que no vuelva.
+    """
+    clause = port_clause((51000, 51001), negate=True)
+    assert "not (" not in clause
+    assert "(not tcp or (" in clause and "(not udp or (" in clause
+    assert port_clause((), negate=True) == "true"
+
+
+def test_port_exclusion_behaves_as_expected_per_protocol():
+    """Lo que de verdad hace la cláusula, protocolo a protocolo (con el evaluador del driver)."""
+    filt = build_network_filter("outbound", exclude_lan=False, exclude_ports=(51000,))
+
+    def udp(sport, dport=443):
+        ip = struct.pack(
+            "!BBHHHBBH4s4s",
+            0x45,
+            0,
+            28,
+            0,
+            0,
+            64,
+            17,
+            0,
+            bytes([192, 168, 1, 10]),
+            bytes([8, 8, 8, 8]),
+        )
+        return ip + struct.pack("!HHHH", sport, dport, 8, 0)
+
+    def icmp():
+        ip = struct.pack(
+            "!BBHHHBBH4s4s",
+            0x45,
+            0,
+            28,
+            0,
+            0,
+            64,
+            1,
+            0,
+            bytes([192, 168, 1, 10]),
+            bytes([8, 8, 8, 8]),
+        )
+        return ip + struct.pack("!BBHHH", 8, 0, 0, 1, 1)
+
+    assert evaluates_to(filt, ipv4_tcp("192.168.1.10", "8.8.8.8", sport=51000), True) is False
+    assert evaluates_to(filt, ipv4_tcp("192.168.1.10", "8.8.8.8", sport=52000), True) is True
+    assert evaluates_to(filt, udp(51000), True) is False
+    assert evaluates_to(filt, udp(52000), True) is True
+    assert evaluates_to(filt, icmp(), True) is True, "ICMP no tiene puertos: no se excluye"

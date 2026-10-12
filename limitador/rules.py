@@ -86,6 +86,10 @@ class Settings:
     autostart: bool = False
     start_on_launch: bool = False  # begin limiting as soon as the app opens
     # --- perfil de juego (el motivo del proyecto: menos ms, más estables) ---
+    #: Qué tráfico se captura: "all" (todo, como siempre) o "limited" (solo lo que se limita).
+    #: Con "limited" el tráfico que no se va a limitar no pasa por el motor, así que no puede
+    #: ser retrasado por él. Las aplicaciones con prioridad absoluta se dejan fuera siempre.
+    capture_scope: str = "all"
     game_mode: bool = False  # presupuesto de retardo corto: el ping no se dispara
     monitor_latency: bool = False  # medir el RTT mientras se limita
     latency_host: str = DEFAULT_LATENCY_HOST  # a quién se mide (idealmente, tu servidor)
@@ -98,6 +102,11 @@ class Settings:
     @property
     def has_global_limit(self) -> bool:
         return self.global_down_bps > 0 or self.global_up_bps > 0
+
+    @property
+    def scoped_capture(self) -> bool:
+        """True si se captura solo el tráfico que se va a limitar (menos latencia añadida)."""
+        return self.capture_scope == "limited"
 
     @property
     def effective_max_delay_ms(self) -> float:

@@ -50,12 +50,44 @@ def remote_field(direction: str) -> str:
     raise ValueError(f"direction must be 'inbound' or 'outbound', got {direction!r}")
 
 
+#: Campos de puerto del lenguaje de filtros, por protocolo.
+_TCP_PORTS: tuple[str, ...] = ("tcp.SrcPort", "tcp.DstPort")
+_UDP_PORTS: tuple[str, ...] = ("udp.SrcPort", "udp.DstPort")
+
+
+def port_clause(ports: tuple[int, ...] | list[int], *, negate: bool = False) -> str:
+    """Condición sobre puertos, en la forma que WinDivert 2.2.2 acepta *de verdad*.
+
+    Tres trampas, todas verificadas con el compilador y el evaluador del propio driver:
+
+    * ``not (a or b)`` es un error de parseo: la negación se escribe con De Morgan.
+    * ``not tcp.SrcPort == 80`` **no** significa "este paquete no va por el puerto 80". Para un
+      paquete que no sea TCP, el campo vale 0 y la expresión se evalúa como ``(not 0) == 80``,
+      que es falso: el paquete queda fuera. Medido: con la cláusula de los cuatro campos sin
+      guardas, un paquete TCP del puerto 52000 (que debería pasar) daba falso. Por eso cada
+      protocolo va guardado con ``(not tcp or ...)``.
+    * Sin guardas tampoco vale ``!=`` por campo ni envolver cada comparación en paréntesis.
+
+    Medido con las guardas: TCP 51000 -> fuera, TCP 52000 -> dentro, UDP 51000 -> fuera,
+    UDP 52000 -> dentro, ICMP -> dentro (no tiene puertos, así que no se excluye nunca).
+    """
+    if not ports:
+        return "true"
+    tcp = " and ".join(f"not {field} == {port}" for port in ports for field in _TCP_PORTS)
+    udp = " and ".join(f"not {field} == {port}" for port in ports for field in _UDP_PORTS)
+    if negate:
+        return f"(not tcp or ({tcp})) and (not udp or ({udp}))"
+    return f"(tcp and ({' or '.join(f'{f} == {p}' for p in ports for f in _TCP_PORTS)})) or (udp and ({' or '.join(f'{f} == {p}' for p in ports for f in _UDP_PORTS)}))"
+
+
 def build_network_filter(
     direction: str,
     *,
     exclude_lan: bool = True,
     excluded_blocks: tuple[tuple[str, str], ...] = DEFAULT_EXCLUDED_BLOCKS,
     exclude_own: bool = False,
+    only_ports: tuple[int, ...] = (),
+    exclude_ports: tuple[int, ...] = (),
 ) -> str:
     """Kernel filter for one direction of the network layer.
 
@@ -63,6 +95,12 @@ def build_network_filter(
     excluding local networks, multicast and broadcast. IPv6 packets match the IPv4
     address conditions vacuously (``ip.DstAddr`` is false for them), which is what we
     want: they are captured and the per-family decision is made in user space.
+
+    ``only_ports`` limita la captura a los puertos de esas aplicaciones (y a nada más):
+    el tráfico que no se va a limitar no entra en el motor, así que no puede ser retrasado por
+    él. ``exclude_ports`` hace lo contrario: deja fuera los puertos de las aplicaciones con
+    prioridad absoluta (el juego), que es lo único que garantiza por construcción que su tráfico
+    no espere en la cola del driver.
 
     ``exclude_own`` deja fuera los paquetes que hemos inyectado nosotros (marca *impostor*).
     Solo hace falta con descriptores separados para capturar e inyectar (si no, lo reinyectado
@@ -74,6 +112,10 @@ def build_network_filter(
     if exclude_lan:
         field = remote_field(direction)
         parts.extend(_exclude_block_expr(field, lo, hi) for lo, hi in excluded_blocks)
+    if only_ports:
+        parts.append(f"({port_clause(only_ports)})")
+    if exclude_ports:
+        parts.append(port_clause(exclude_ports, negate=True))
     return " and ".join(parts)
 
 

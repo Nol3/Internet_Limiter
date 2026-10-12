@@ -89,6 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="perfil de juego: presupuesto de retardo corto (menos bufferbloat)",
     )
     parser.add_argument(
+        "--capture-scope",
+        choices=("all", "limited"),
+        default="all",
+        help="qué tráfico captura el motor: 'all' (todo) o 'limited' (solo lo que se limita)",
+    )
+    parser.add_argument(
         "--latency",
         type=str,
         default="",
@@ -146,6 +152,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         exempt_control=not args.no_control_exemption,
         exclude_lan=not args.limit_lan,
         limit_ipv6=not args.no_ipv6,
+        capture_scope=getattr(args, "capture_scope", "all"),
         game_mode=bool(getattr(args, "game_mode", False)),
         monitor_latency=bool(getattr(args, "latency", "")),
         latency_host=getattr(args, "latency", "") or DEFAULT_LATENCY_HOST,

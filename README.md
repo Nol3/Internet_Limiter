@@ -51,6 +51,11 @@ El proyecto nació para eso, y lo atacan dos piezas:
 2. **Prioridad absoluta** (pestaña *Aplicaciones* → *Prioridad (no limitar)*, o `--exempt RUTA`):
    el juego marcado así **no pasa por el planificador ni por el límite global**. Su tráfico sale
    en cuanto llega, aunque otra aplicación esté descargando a tope.
+3. **Alcance de captura** (pestaña *General* → *Capturar solo lo que se limita*, o
+   `--capture-scope limited`): el motor **solo captura el tráfico de las aplicaciones que se van a
+   limitar**, y deja fuera siempre el de las que tienen prioridad absoluta. Lo que no entra en el
+   motor no puede esperar en la cola del driver: es la única garantía **por construcción**, y es
+   la que de verdad se nota (medido: +101 ms → +0 ms).
 
 ### Compruébalo con tus números
 
@@ -64,37 +69,34 @@ Mide el ping en cuatro situaciones con una descarga de fondo real: en reposo, co
 limitador, con carga y modo juego, y con carga y descriptores separados. Te dice cuántos ms
 añade o quita cada configuración, en lugar de pedirte que te lo creas.
 
-### Lo que se midió aquí (y lo que obligó a corregir)
+### Lo que se midió aquí (y el arreglo que salió de ahí)
 
 Medido en esta línea (Windows 11 x64, descarga de fondo de 1 GB desde un espejo, 8 s por fase):
 
 | situación | ping medio | respecto al reposo |
 |---|---|---|
 | en reposo | 16 ms | — |
-| con carga, **sin** el limitador | 17 ms | +1 ms |
-| con carga, motor capturando **sin ningún límite** | 98 ms | **+82 ms** |
-| con carga, modo juego con recorte suave (95 %) | 103 ms | +87 ms |
-| con carga, modo juego con recorte agresivo (85 %) | 112-138 ms | +96-122 ms |
+| con carga, **sin** el motor | 17 ms | +1 ms |
+| con carga, motor capturando **todo**, sin ningún límite | 117 ms | **+101 ms** |
+| con carga, modo juego capturando todo (recorte agresivo) | 77 ms | +61 ms |
+| con carga, **alcance "limited"** (solo se captura lo que se limita) | **16 ms** | **+0 ms** |
 
-Tres conclusiones honestas:
+Tres conclusiones, todas medidas:
 
-- **Esta línea no tenía *bufferbloat*** con esa descarga: sin el limitador, el ping no se movía
+- **Esta línea no tenía *bufferbloat***: sin el motor, el ping no se movía con la descarga
   (16 → 17 ms). El recorte del modo juego, aquí, no era lo que hacía falta.
-- **El coste está en el motor, no en el recorte.** Con el motor capturando y reinyectando **sin
-  ningún límite** el ping ya sube a 98 ms. Cada paquete pasa por Python (recibir, parsear,
-  atribuir a un proceso, reinyectar) y a ~30.000 paquetes/s ese trabajo se pone delante de tus
-  paquetes en la cola del driver, que es FIFO. No es el recorte, ni los descartes, ni el tamaño
-  del recorte, ni los descriptores separados: todo eso se midió y se descartó.
-- Es decir: el limitador **controla bien el caudal** (verificado al 87-97 % del objetivo) pero
-  **hoy no puede prometer bajar el ping mientras limita un caudal alto**. Mientras juegas, sin
-  descargas de fondo, el coste es despreciable (16 ms en reposo, con el motor o sin él); el
-  problema aparece justo cuando el limitador tiene trabajo que hacer.
+- **El coste estaba en el motor, no en el recorte**: con el motor capturando **todo** y *sin
+  ningún límite puesto* el ping subía a 117 ms. Cada paquete pasaba por Python (recibir, parsear,
+  atribuir, reinyectar) y ese trabajo se ponía delante de tus paquetes en la cola del driver,
+  que es FIFO.
+- **El arreglo es capturar menos.** Con el alcance "limited" el motor solo ve el tráfico de lo
+  que se limita, así que el ping de otra aplicación no entra siquiera en el motor: **+0 ms**,
+  idéntico al reposo, mientras la descarga sí se limitaba.
 
-La siguiente línea de trabajo está identificada y es de arquitectura, no un ajuste: **reducir el
-coste por paquete** y, sobre todo, **dejar el tráfico del juego fuera de la captura** (excluir
-sus puertos en el filtro del driver en cuanto se conocen), que es lo único que garantiza por
-construcción que no pueda ser retrasado. Hasta entonces, la promesa del proyecto es el control
-del caudal y la prioridad lógica, no una mejora del ping medida.
+Por el camino se descartaron, midiendo y no suponiendo: el tamaño del recorte (suave y agresivo
+dan lo mismo), los descartes, los descriptores separados y el coste por paquete en Python (que se
+redujo 2,5× —de 5,7 a 2,3 µs, medido con `tools\packet_bench.py`— sin mover la latencia, lo que
+demostró que el cuello no estaba ahí).
 
 ### Verificado en hardware real
 

@@ -629,3 +629,112 @@ def test_game_mode_shortens_the_delay_budget(fake_driver):
             assert float(shaper["max_delay_ms"]) <= GAME_MODE_MAX_DELAY_MS + 0.01, name
     finally:
         engine.stop()
+
+
+def _fake_ports(engine, monkeypatch, ports=(51000,), exe=DEMO_EXE):
+    monkeypatch.setattr(engine.procmap, "pids", lambda: (4321,))
+    monkeypatch.setattr(engine.procmap, "path_for", lambda *_a, **_k: exe)
+    monkeypatch.setattr(engine.procmap, "ports_for_pid", lambda *_a, **_k: set(ports))
+
+
+def test_scoped_capture_only_takes_what_is_limited(fake_driver, monkeypatch):
+    """Con alcance "limited" y sin límite global, solo se captura el tráfico de lo que se limita.
+
+    Es el arreglo de latencia: lo que no entra en el motor no puede esperar en la cola del driver.
+    """
+    config = Config(settings=Settings(capture_scope="limited"))
+    config.set_rule(AppRule(exe=DEMO_EXE, down_bps=1 * MB))
+    engine = build_engine(config)
+    _fake_ports(engine, monkeypatch)
+    include, exclude = engine._capture_scope_ports()
+    assert include == (51000,)
+    assert exclude == ()
+    filt = engine._capture_filter("outbound")
+    assert "tcp.SrcPort == 51000" in filt and "tcp.DstPort == 51000" in filt
+    assert "tcp.SrcPort == 443" not in filt
+    assert "solo" in engine.capture_summary()
+
+
+def test_priority_apps_never_enter_the_capture(fake_driver, monkeypatch):
+    """Una app con prioridad absoluta se deja fuera del filtro, aunque haya límite global."""
+    config = Config(settings=Settings(capture_scope="limited", global_down_bps=1 * MB))
+    config.set_rule(AppRule(exe=DEMO_EXE, exempt=True))
+    engine = build_engine(config)
+    _fake_ports(engine, monkeypatch)
+    include, exclude = engine._capture_scope_ports()
+    assert exclude == (51000,), "los puertos del juego deben quedar fuera"
+    assert include == (), "con límite global hay que capturar el resto"
+    filt = engine._capture_filter("outbound")
+    assert "not tcp.SrcPort == 51000" in filt
+
+
+def test_nothing_to_limit_means_nothing_is_captured(fake_driver):
+    """Sin nada que limitar no se captura nada: cero latencia añadida por definición."""
+    config = Config(settings=Settings(capture_scope="limited"))
+    engine = build_engine(config)
+    assert engine._capture_filter("outbound") == "false"
+    assert "nada" in engine.capture_summary()
+
+
+def test_default_scope_still_captures_everything(fake_driver, monkeypatch):
+    """Sin tocar nada, el comportamiento es el de siempre (capturar todo)."""
+    config = Config(settings=Settings())
+    engine = build_engine(config)
+    _fake_ports(engine, monkeypatch)
+    assert engine._capture_scope_ports() == ((), ())
+    assert engine.capture_summary() == "todo el tráfico"
+
+
+def test_scoped_capture_reaches_the_handle_filter(fake_driver, monkeypatch):
+    """El filtro calculado es el que acaba abriendo el descriptor."""
+    config = Config(settings=Settings(capture_scope="limited"))
+    config.set_rule(AppRule(exe=DEMO_EXE, down_bps=1 * MB))
+    engine = build_engine(config)
+    _fake_ports(engine, monkeypatch)
+    engine.start()
+    try:
+        assert any("tcp.SrcPort == 51000" in str(getattr(h, "filter", "")) for h in engine._handles)
+    finally:
+        engine.stop()
+
+
+def test_capture_scope_change_reopens_the_handles(fake_driver, monkeypatch):
+    """Cuando se aprenden los puertos, la captura se reabre sola con el filtro nuevo.
+
+    Es lo que permite que el juego arranque *después* del limitador: sus puertos se aprenden y su
+    tráfico sale del motor sin que el usuario reinicie nada.
+    """
+    config = Config(settings=Settings(capture_scope="limited"))
+    config.set_rule(AppRule(exe=DEMO_EXE, down_bps=1 * MB))
+    engine = build_engine(config)
+    engine.start()
+    try:
+        before = list(engine._handles)
+        assert all("tcp.SrcPort == 51000" not in str(h.filter) for h in before), (
+            "al arrancar no se conocen los puertos: se captura el filtro base"
+        )
+        _fake_ports(engine, monkeypatch)
+        engine._apply_capture_scope()
+        after = list(engine._handles)
+        assert after != before, "debe reabrir con el filtro nuevo"
+        assert all(h.closed for h in before), "los descriptores viejos se cierran"
+        assert any("tcp.SrcPort == 51000" in str(h.filter) for h in after)
+    finally:
+        engine.stop()
+
+
+def test_capture_scope_refresh_is_idempotent(fake_driver, monkeypatch):
+    """Si el alcance no cambió, no se reabre nada (no se toca la captura por gusto)."""
+    config = Config(settings=Settings(capture_scope="limited"))
+    config.set_rule(AppRule(exe=DEMO_EXE, down_bps=1 * MB))
+    engine = build_engine(config)
+    _fake_ports(engine, monkeypatch)
+    engine.start()
+    try:
+        engine._apply_capture_scope()  # aplica el alcance y fija la clave
+        handles = list(engine._handles)
+        engine._apply_capture_scope()  # segunda vez: nada que hacer
+        assert list(engine._handles) == handles
+        assert not any(h.closed for h in handles)
+    finally:
+        engine.stop()

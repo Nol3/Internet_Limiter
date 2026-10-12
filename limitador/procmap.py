@@ -247,6 +247,20 @@ class ProcessMap:
                 pid = self._event_ports.get(key)
         return pid
 
+    def ports_for_pid(self, pid: int) -> set[int]:
+        """Puertos locales que la tabla atribuye a ese proceso.
+
+        Se usa para decidir qué tráfico capturar: los puertos de una aplicación con prioridad
+        absoluta se dejan fuera del filtro (su tráfico no entra en el motor), y con el alcance
+        "limited" solo se capturan los de las aplicaciones que sí se limitan.
+        """
+        with self._lock:
+            ports = {port for (_proto, port), owner in self._ports.items() if owner == pid}
+            ports.update(
+                port for (_proto, port), owner in self._event_ports.items() if owner == pid
+            )
+        return ports
+
     def path_for(self, pid: int) -> str | None:
         return self._info(pid).path
 

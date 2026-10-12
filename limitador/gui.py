@@ -277,6 +277,18 @@ class LimitadorApp(tk.Tk):
         ttk.Button(gaming, text="Aplicar", width=8, command=self._on_latency_host).grid(
             row=1, column=2, sticky="w", pady=(6, 0)
         )
+        self.scoped_capture_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            gaming,
+            text="Capturar solo lo que se limita: el resto del tráfico no pasa por el motor "
+            "(y el de tus juegos, tampoco)",
+            variable=self.scoped_capture_var,
+            command=self._on_capture_scope,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.capture_var = tk.StringVar(value="")
+        ttk.Label(gaming, textvariable=self.capture_var, style="Muted.TLabel").grid(
+            row=5, column=0, columnspan=4, sticky="w"
+        )
         self.latency_var = tk.StringVar(value="Latencia: sin medir")
         ttk.Label(gaming, textvariable=self.latency_var, style="Muted.TLabel").grid(
             row=2, column=0, columnspan=4, sticky="w", pady=(6, 0)
@@ -476,6 +488,7 @@ class LimitadorApp(tk.Tk):
         self.autostart_var.set(autostart.is_enabled())
         self.autostart_on_launch_var.set(settings.start_on_launch)
         self.game_mode_var.set(settings.game_mode)
+        self.scoped_capture_var.set(settings.scoped_capture)
         self.monitor_latency_var.set(settings.monitor_latency)
         self.latency_host_var.set(settings.latency_host)
 
@@ -534,6 +547,18 @@ class LimitadorApp(tk.Tk):
     def _on_game_mode(self) -> None:
         """El perfil de juego: presupuesto de retardo corto (menos bufferbloat)."""
         self.config_data.settings.game_mode = bool(self.game_mode_var.get())
+        self._commit_settings()
+
+    def _on_capture_scope(self) -> None:
+        """Alcance de captura: todo, o solo el tráfico que se va a limitar.
+
+        Capturar menos es la palanca directa contra la latencia añadida: lo que no entra en el
+        motor no puede esperar en la cola del driver. El tráfico de las aplicaciones con
+        prioridad absoluta se deja fuera siempre.
+        """
+        self.config_data.settings.capture_scope = (
+            "limited" if self.scoped_capture_var.get() else "all"
+        )
         self._commit_settings()
 
     def _on_latency_toggle(self) -> None:
@@ -694,6 +719,8 @@ class LimitadorApp(tk.Tk):
         self._snapshot = snapshot
         if self.config_data.settings.monitor_latency:
             self.latency_var.set(self.latency.stats().line())
+        if self.engine.is_running and self.config_data.settings.scoped_capture:
+            self.capture_var.set(f"Capturando: {self.engine.capture_summary()}")
         self._draw_graph()
         settings = self.config_data.settings
         self.total_var.set(

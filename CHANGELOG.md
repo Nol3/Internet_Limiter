@@ -10,6 +10,15 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 ## [Sin publicar]
 
 ### Añadido
+- **Alcance de captura** (`Settings.capture_scope`, casilla *Capturar solo lo que se limita*,
+  `--capture-scope limited`): el motor captura solo el tráfico de las aplicaciones que se van a
+  limitar, y deja fuera siempre el de las de prioridad absoluta. Los puertos se aprenden de la
+  tabla de conexiones y de la capa FLOW, y la captura se reabre en caliente cuando cambian
+  (sin reiniciar los hilos). **Medido: el ping bajo carga pasa de +101 ms a +0 ms.**
+- `tools/packet_bench.py`: mide el coste por paquete del motor con descriptor falso (sin driver)
+  y perfila el reparto. Sirvió para bajar el camino por paquete de 5,7 a 2,3 µs (2,5×), sacando
+  `ipaddress` del camino caliente (era el 42 % del coste) y formateando las direcciones solo si
+  alguien las pide.
 - **Perfil de juego**, el motivo del proyecto: ajuste *Modo juego* que baja el presupuesto de
   retardo a 20 ms, y **reglas de prioridad** (`AppRule.exempt`) cuyo tráfico no pasa ni por el
   planificador ni por el límite global. Botón *Prioridad (no limitar)* en la pestaña
@@ -29,13 +38,20 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 - Descartada la vía de descriptores separados para capturar e inyectar: no mejoraba el caudal y
   empeoraba o igualaba la latencia (medido dos veces, en sentidos opuestos).
 
-### Conocido (medido, sin resolver)
-- **El motor añade ~82 ms de ping bajo una descarga a tope**, incluso sin ningún límite puesto
-  (16 ms en reposo → 98 ms). El coste es por paquete (recibir, parsear, atribuir y reinyectar en
-  Python, ~30.000 paquetes/s) en la cola FIFO del driver, delante de los paquetes del juego. No es
-  el recorte ni los descartes: se midió con recorte suave, agresivo y sin límite. El camino de
-  arreglo está identificado (reducir el coste por paquete y excluir los puertos del juego del
-  filtro de captura) y **no está implementado**.
+### Corregido (el arreglo de latencia, medido)
+- **El motor añadía ~100 ms de ping bajo una descarga a tope**, incluso sin ningún límite puesto
+  (16 ms en reposo → 117 ms capturando todo). El coste era por paquete, en la cola FIFO del
+  driver, delante de los paquetes de latencia crítica. Arreglado con el **alcance de captura**:
+  lo que no entra en el motor no puede ser retrasado. Medido: **+101 ms → +0 ms** con el alcance
+  "limited", mientras la descarga sigue limitada.
+- **El inyector guardaba el descriptor viejo** al reabrir la captura en caliente (registraba
+  "Divert handle is not open" y perdía lo que tuviera en la cola): ahora lee el descriptor en
+  cada vuelta, igual que el hilo de captura.
+- **Trampa de WinDivert en la negación de puertos**: `not tcp.SrcPort == 80` no significa "este
+  paquete no va por el 80" — para un paquete que no es TCP el campo vale 0 y la expresión se
+  evalúa como `(not 0) == 80`, falso, así que el paquete queda fuera. La cláusula de exclusión
+  lleva ahora guardas de protocolo (`(not tcp or (...)) and (not udp or (...))`) y un test que
+  fija el comportamiento protocolo a protocolo con el evaluador del driver.
 
 
 ## [2.0.0] — 2026-10-12

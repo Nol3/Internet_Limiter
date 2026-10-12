@@ -63,6 +63,10 @@ log = logging.getLogger(__name__)
 MB = 1024 * 1024
 MIN_QUEUE_BYTES = 2 * MB
 MAX_QUEUE_BYTES = 16 * MB
+#: Máximo de puertos por lado en el filtro de captura (WinDivert compila el filtro a bytecode).
+MAX_SCOPED_PORTS = 24
+#: Cada cuánto se revisa si el alcance de captura debe cambiar (puertos aprendidos).
+CAPTURE_REFRESH_SECONDS = 3.0
 #: Cuántos paquetes saca el inyector de una vez (menos traspasos entre hilos = menos latencia).
 MAX_INJECT_BURST = 64
 MAX_CONSECUTIVE_RECV_ERRORS = 20
@@ -256,6 +260,8 @@ class Engine:
         self._started_at = 0.0
         self._errors: list[str] = []
         self._handles: list[object] = []
+        #: Filtros de captura en uso, para saber si el alcance obliga a reabrir.
+        self._capture_filter_key: tuple[str, str] = ("", "")
         #: Descriptores de solo escritura, uno por dirección, para inyectar (ver _open_handles).
         self._send_handles: dict[str, object] = {}
         self._capture_threads: dict[str, threading.Thread] = {}
@@ -447,28 +453,90 @@ class Engine:
         return self._paused
 
     # ------------------------------------------------------------------- handles
+    def _capture_scope_ports(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """``(puertos a incluir, puertos a excluir)`` para el filtro de captura.
+
+        Dos ideas, las dos para que el tráfico sensible no espere en la cola del driver:
+
+        * Las aplicaciones con **prioridad absoluta** (el juego) se excluyen siempre que se
+          conozcan sus puertos: su tráfico no entra en el motor, así que nada puede retrasarlo.
+        * Con el alcance "limited" y sin límite global, se captura **solo** el tráfico de las
+          aplicaciones que sí se limitan; el resto circula sin pasar por Python.
+
+        Los puertos se aprenden de la tabla de conexiones y de la capa FLOW, que son
+        independientes de la captura de red: se conocen aunque no se esté capturando nada.
+        """
+        settings = self.config.settings
+        if not settings.scoped_capture:
+            return (), ()
+        exclude: set[int] = set()
+        include: set[int] = set()
+        needs_include = not settings.has_global_limit
+        for pid in self.procmap.pids():
+            path = self.procmap.path_for(pid)
+            rule = self.config.rule_for_exe(path) if path else None
+            if rule is not None and rule.is_priority:
+                exclude |= self.procmap.ports_for_pid(pid)
+            elif needs_include and rule is not None and rule.has_limit:
+                include |= self.procmap.ports_for_pid(pid)
+        return (
+            tuple(sorted(include)[:MAX_SCOPED_PORTS]),
+            tuple(sorted(exclude)[:MAX_SCOPED_PORTS]),
+        )
+
+    def _capture_filter(self, real: str, *, exclude_own: bool = False) -> str:
+        """Filtro de captura de una dirección, con el alcance configurado ya aplicado."""
+        settings = self.config.settings
+        include, exclude = self._capture_scope_ports()
+        if settings.scoped_capture and not settings.has_global_limit and not include:
+            # Nada que limitar: no se captura nada, así que no se añade latencia alguna.
+            return "false"
+        return build_network_filter(
+            real,
+            exclude_lan=settings.exclude_lan,
+            exclude_own=exclude_own,
+            only_ports=include,
+            exclude_ports=exclude,
+        )
+
+    def capture_summary(self) -> str:
+        """Qué está capturando el motor ahora mismo, en una línea."""
+        if not self.config.settings.scoped_capture:
+            return "todo el tráfico"
+        include, exclude = self._capture_scope_ports()
+        if (
+            self.config.settings.scoped_capture
+            and not self.config.settings.has_global_limit
+            and not include
+        ):
+            return "nada (no hay nada que limitar)"
+        parts = []
+        if include:
+            parts.append(f"solo {len(include)} puertos de apps limitadas")
+        if exclude:
+            parts.append(f"sin {len(exclude)} puertos con prioridad")
+        return " y ".join(parts) if parts else "todo el tráfico"
+
     def _validate_filters(self) -> None:
-        for direction in ("in", "out"):
-            real = "inbound" if direction == "in" else "outbound"
-            filt = build_network_filter(real, exclude_lan=self.config.settings.exclude_lan)
+        for real in ("inbound", "outbound"):
+            filt = self._capture_filter(real)
             ok, message = validate_filter(filt)
             if not ok:
                 raise LimiterError(f"El filtro de captura no compila: {message}")
 
     def _open_handles(self) -> None:
-        settings = self.config.settings
         split_handles = os.environ.get(SPLIT_HANDLES_ENV) == "1"
         try:
+            key: list[str] = []
             for direction, real in (("out", "outbound"), ("in", "inbound")):
-                filt = build_network_filter(real, exclude_lan=settings.exclude_lan)
+                filt = self._capture_filter(real)
+                key.append(filt)
                 send_handle = None
                 if split_handles:
                     # Modo de diagnóstico: descriptor propio (solo escritura) para inyectar y uno
                     # de solo lectura para capturar. El filtro de captura excluye lo que inyectamos
                     # (marca *impostor*) para no recapturarlo en bucle.
-                    filt = build_network_filter(
-                        real, exclude_lan=settings.exclude_lan, exclude_own=True
-                    )
+                    filt = self._capture_filter(real, exclude_own=True)
                     try:
                         candidate = self._handle_factory(filt, Layer.NETWORK, 0, Flag.SEND_ONLY)
                         candidate.open()
@@ -480,6 +548,7 @@ class Engine:
                 handle.open()
                 self._handles.append(handle)
                 self._send_handles[direction] = send_handle or handle
+            self._capture_filter_key = (key[0], key[1])
         except OSError as exc:
             self._close_handles()
             winerror = getattr(exc, "winerror", None)
@@ -583,6 +652,52 @@ class Engine:
         """Called from the GUI after any setting changes."""
         self.config.settings.clamp()
         self._sync_shapers()
+        self._apply_capture_scope()
+
+    def _apply_capture_scope(self) -> None:
+        """Reabre la captura si el alcance cambió (por ejemplo, al aprender los puertos del juego).
+
+        Se cambian solo los descriptores, no los hilos: entre el cierre y la apertura el tráfico
+        circula sin nosotros (fail-open), así que como mucho se pierden unos paquetes que TCP
+        retransmite. Si el filtro nuevo no abriera, se vuelve al anterior y se avisa.
+        """
+        if not self._running or self._released or not self._handles:
+            return
+        wanted = (self._capture_filter("outbound"), self._capture_filter("inbound"))
+        if wanted == self._capture_filter_key:
+            return
+        previous = self._capture_filter_key
+        self._emit("info", f"alcance de captura: {self.capture_summary()}")
+        try:
+            self._reopen_handles(wanted)
+            self._capture_filter_key = wanted
+        except Exception as exc:
+            self._note_error(
+                f"no se pudo cambiar el alcance de captura ({exc}); se mantiene el anterior"
+            )
+            with contextlib.suppress(Exception):
+                self._reopen_handles(previous)
+                self._capture_filter_key = previous
+
+    def _reopen_handles(self, wanted: tuple[str, str]) -> None:
+        """Cierra los descriptores de captura y los abre con los filtros indicados.
+
+        El orden importa: se cierran primero (el tráfico circula sin nosotros un instante) y se
+        abren después. Los hilos de captura leen el descriptor en cada vuelta, así que recogen el
+        nuevo solos; el ``recv`` en curso falla una vez y se registra, sin dejar de capturar.
+        """
+        for index, _real in ((0, "outbound"), (1, "inbound")):
+            filt = wanted[index]
+            self._handles[index].close()
+            handle = self._handle_factory(filt, Layer.NETWORK, 0, Flag.DEFAULT)
+            handle.open()
+            self._handles[index] = handle
+            direction = "out" if index == 0 else "in"
+            if (
+                self._send_handles.get(direction) is not None
+                and self._send_handles.get(direction) not in self._handles
+            ):
+                self._send_handles[direction] = handle
 
     # ------------------------------------------------------------------ rule lookup
     def _rule_signature(self) -> tuple[str, str]:
@@ -614,14 +729,17 @@ class Engine:
     # --------------------------------------------------------------------- threads
     def _capture_loop(self, direction: str) -> None:
         """Receive, decide, reinject. Never dies holding a packet."""
-        try:
-            capture = self._handles[0 if direction == "out" else 1]
-            handle = self._send_handles.get(direction) or capture
-        except IndexError:  # pragma: no cover - defensive
-            return
+        index = 0 if direction == "out" else 1
         outbound = direction == "out"
         consecutive_errors = 0
         while self._running:
+            # El descriptor se lee en cada vuelta: así el alcance de captura puede cambiar en
+            # caliente (cuando se aprenden los puertos del juego) sin reiniciar los hilos.
+            try:
+                capture = self._handles[index]
+            except IndexError:  # pragma: no cover - defensive
+                return
+            handle = self._send_handles.get(direction) or capture
             try:
                 packet = capture.recv()
                 consecutive_errors = 0
@@ -705,6 +823,12 @@ class Engine:
             return
         queue = self._queues[direction]
         while True:
+            # El descriptor se lee en cada vuelta: el alcance de captura puede reabrir los
+            # descriptores en caliente, y el inyector tiene que usar el nuevo (si no, registra
+            # "Divert handle is not open" y pierde los paquetes que tenía en la cola).
+            handle = (
+                self._send_handles.get(direction) or self._handles[0 if direction == "out" else 1]
+            )
             item = queue.get(0.2)
             if item is None:
                 if not self._running:
@@ -766,11 +890,13 @@ class Engine:
                 self._note_error(f"reinyección: {exc}")
 
     def _supervisor_loop(self) -> None:
+        next_scope_check = time.monotonic() + CAPTURE_REFRESH_SECONDS
         """Watchdog: if a worker stops unexpectedly, give the capture back."""
         while self._running:
             time.sleep(0.5)
             if not self._running:
                 break
+            now = time.monotonic()
             dead = [
                 f"captura {name}"
                 for name, thread in self._capture_threads.items()
@@ -784,6 +910,13 @@ class Engine:
             if dead:
                 self.emergency_release("se han detenido hilos del motor (" + ", ".join(dead) + ")")
                 break
+            # Alcance de captura: los puertos de las apps prioritarias (y de las limitadas) se
+            # aprenden cuando arrancan, así que se revisa de vez en cuando para dejar su tráfico
+            # fuera del motor. Lo que no se captura no puede esperar en la cola del driver.
+            if self.config.settings.scoped_capture and now >= next_scope_check:
+                next_scope_check = now + CAPTURE_REFRESH_SECONDS
+                with contextlib.suppress(Exception):
+                    self._apply_capture_scope()
 
     def _start_event_listener(self) -> None:
         """Atribución exacta puerto -> proceso usando las capas de eventos de WinDivert.

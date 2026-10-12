@@ -39,6 +39,7 @@ from limitador.engine import Engine
 from limitador.latency import LatencyMonitor, LatencyStats
 from limitador.rules import (
     GAME_MODE_MAX_DELAY_MS,
+    AppRule,
     Config,
     Settings,
 )
@@ -172,31 +173,11 @@ def main() -> int:
         engine=engine,
     )
 
-    # Quinta fase: el MISMO modo juego pero con un recorte suave (justo por debajo de la línea).
-    # La diferencia con la fase 3 es la clave: recortar muy por debajo de lo que el servidor
-    # entrega obliga a descartar, TCP retransmite y el caudal de paquetes que entra SUBE, con la
-    # cola del driver (FIFO) delante de los paquetes de control.
     gentle_cap = max(line * GENTLE_CAP_FRACTION, 0.5)
-    gentle_config = Config(
-        settings=Settings(
-            global_down_bps=int(gentle_cap * MB),
-            global_up_bps=int(gentle_cap * MB),
-            max_delay_ms=GAME_MODE_MAX_DELAY_MS,
-            game_mode=True,
-        )
-    )
-    engine_gentle = Engine(gentle_config)
-    gentle = phase(
-        f"5. con carga, modo juego con recorte suave ({gentle_cap:.1f} MB/s)",
-        args.host,
-        args.seconds,
-        load=load,
-        engine=engine_gentle,
-    )
 
-    # Prueba decisiva: el motor capturando y reinyectando SIN ningún límite. Separa "el motor
-    # está en el camino" de "el motor está limitando": si el ping también se dispara aquí, el
-    # coste es del propio motor (CPU/GIL por paquete), no del recorte.
+    # Cuarta fase (la prueba decisiva): el motor capturando y reinyectando SIN ningún límite.
+    # Separa "el motor está en el camino" de "el motor está limitando": si el ping también se
+    # dispara aquí, el coste es del propio motor, no del recorte.
     plain_config = Config(settings=Settings())
     engine_plain = Engine(plain_config)
     passthrough = phase(
@@ -206,6 +187,47 @@ def main() -> int:
         load=load,
         engine=engine_plain,
     )
+
+    # Quinta fase: EL ARREGLO ARQUITECTÓNICO. Se limita SOLO la descarga (curl) y el motor
+    # captura únicamente su tráfico: el ping no entra en el motor, así que nada puede retrasarlo.
+    # Es el uso recomendado para jugar: limitar lo que molesta y no tocar lo demás.
+    scoped_config = Config(
+        settings=Settings(
+            capture_scope="limited",
+            max_delay_ms=GAME_MODE_MAX_DELAY_MS,
+            game_mode=True,
+        )
+    )
+    scoped_config.set_rule(
+        AppRule(exe=CURL, down_bps=int(gentle_cap * MB), up_bps=int(gentle_cap * MB))
+    )
+    engine_scoped = Engine(scoped_config)
+    scoped = phase(
+        "5. con carga, limite por aplicacion con alcance 'limited'",
+        args.host,
+        args.seconds,
+        load=load,
+        engine=engine_scoped,
+    )
+
+    print("\n" + "=" * 62)
+    print("  QUÉ HA HECHO EL MOTOR (para que 'ping bajo' no sea 'no capturó nada')")
+    print("=" * 62)
+    for name, engine_obj in (
+        ("sin límites", engine_plain),
+        ("modo juego (todo)", engine),
+        ("alcance limited", engine_scoped),
+    ):
+        snap = engine_obj.snapshot()
+        seen = (snap.bytes_down + snap.bytes_up) / MB
+        forwarded = (snap.forwarded_down + snap.forwarded_up) / MB
+        dropped = (snap.dropped_down + snap.dropped_up) / MB
+        print(
+            f"  {name:<20} visto {seen:7.1f} MB · reenviado {forwarded:7.1f} MB"
+            f" · descartado {dropped:6.1f} MB · paquetes descartados {snap.dropped_packets:>7}"
+        )
+    print("  (con alcance 'limited' el motor solo ve el tráfico de lo que limita: por eso el ping")
+    print("   de otra aplicación no puede ser retrasado, y aun así la descarga sí se limita)")
 
     print("\n" + "=" * 62)
     print("  QUÉ HA PASADO")
@@ -230,32 +252,46 @@ def main() -> int:
     )
     print(
         f"  jitter:    sin motor {loaded.jitter_ms:.0f} / motor sin límites "
-        f"{passthrough.jitter_ms:.0f} / modo juego {limited.jitter_ms:.0f} ms"
+        f"{passthrough.jitter_ms:.0f} / alcance limited {scoped.jitter_ms:.0f} ms"
     )
 
     print(
-        f"  con carga, modo juego suave:               {gentle.avg_ms:6.0f} ms  "
-        f"({gentle.avg_ms - base:+.0f} ms)"
+        f"  con carga, motor sin límites (capturando todo): {passthrough.avg_ms:6.0f} ms  "
+        f"({passthrough.avg_ms - base:+.0f} ms)"
     )
-    best = min(limited.avg_ms, gentle.avg_ms)
+    print(
+        f"  con carga, alcance 'limited' (solo lo que se limita): {scoped.avg_ms:6.0f} ms  "
+        f"({scoped.avg_ms - base:+.0f} ms)"
+    )
+    best = min(limited.avg_ms, scoped.avg_ms)
     reference = max(loaded.avg_ms, idle.avg_ms)
-    if passthrough.avg_ms > reference + 20:
+    if scoped.avg_ms + 20 < limited.avg_ms:
+        print(
+            "\n  RESULTADO: el arreglo funciona. Capturando solo lo que se limita, el ping se queda"
+        )
+        print(
+            f"             en {scoped.avg_ms:.0f} ms ({scoped.avg_ms - base:+.0f} ms), frente a "
+            f"{limited.avg_ms:.0f} ms ({limited.avg_ms - base:+.0f} ms) capturando todo."
+        )
+        print(
+            "             Lo que no entra en el motor no puede esperar en la cola del driver: esa"
+        )
+        print(
+            "             es la palanca de verdad, y por eso el alcance 'limited' es lo recomendado"
+        )
+        print("             para jugar (limitar lo que molesta y no tocar lo demás).")
+    elif passthrough.avg_ms > reference + 20:
         print("\n  RESULTADO: el coste está en el MOTOR, no en el recorte. Sin ningún límite, solo")
         print(
             f"             capturando y reinyectando, el ping sube a {passthrough.avg_ms:.0f} ms "
             f"({passthrough.avg_ms - base:+.0f} ms)."
         )
-        print("             Cada paquete pasa por Python (parseo + atribución + cola) y con una")
-        print("             descarga a tope ese coste por paquete se pone delante de tus paquetes.")
-    elif gentle.avg_ms + 10 < limited.avg_ms:
         print(
-            f"\n  RESULTADO: la clave es CUÁNTO recortas: {gentle.avg_ms:.0f} ms con recorte suave "
-            f"frente a {limited.avg_ms:.0f} ms"
+            "             Cada paquete pasa por Python y con una descarga a tope ese coste se pone"
         )
         print(
-            "             con recorte agresivo (los descartes hacen retransmitir a TCP y suben el"
+            "             delante de tus paquetes. El arreglo es capturar menos: alcance 'limited'."
         )
-        print("             caudal de paquetes que entra). Recorta un 5-15%, no a la mitad.")
     elif best <= reference + 5:
         print("\n  RESULTADO: el limitador no añade latencia apreciable bajo carga.")
     else:

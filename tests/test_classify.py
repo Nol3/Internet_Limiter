@@ -11,6 +11,7 @@ from limitador.classify import (
     inspect,
     inspect_safe,
     is_local_remote,
+    is_local_v4_int,
     self_test,
     should_pass_through,
 )
@@ -204,3 +205,61 @@ def test_ipv6_can_be_excluded_from_limiting():
     )
     assert should_pass_through(info, exempt_control=True, limit_ipv6=False) is True
     assert should_pass_through(info, exempt_control=True, limit_ipv6=True) is False
+
+
+def test_fast_lan_check_matches_the_reference():
+    """El atajo en enteros y la comprobación con ``ipaddress`` tienen que coincidir.
+
+    El camino por paquete usa el atajo (sin construir objetos) y el filtro del kernel usa los
+    rangos: si divergieran, el limitador trataría como "internet" tráfico que es local (o al
+    revés), así que se comprueban los bordes de cada rango.
+    """
+    samples = [
+        "0.0.0.0",
+        "1.1.1.1",
+        "8.8.8.8",
+        "10.0.0.1",
+        "10.255.255.255",
+        "11.0.0.1",
+        "127.0.0.1",
+        "127.255.255.255",
+        "169.254.1.1",
+        "172.15.255.255",
+        "172.16.0.1",
+        "172.31.255.255",
+        "172.32.0.1",
+        "192.167.255.255",
+        "192.168.1.10",
+        "192.168.255.255",
+        "192.169.0.1",
+        "223.255.255.255",
+        "224.0.0.1",
+        "239.255.255.255",
+        "240.0.0.1",
+        "255.255.255.255",
+    ]
+    for text in samples:
+        value = int(ipaddress.IPv4Address(text))
+        assert is_local_v4_int(value) is is_local_remote(text), text
+
+
+def tcp_bytes(sport: int = 51000, dport: int = 443, payload: bytes = b"") -> bytes:
+    return (
+        struct.pack("!HHIIBBHHH", sport, dport, 0, 0, (5 << 4), TCP_NO_PAYLOAD, 8192, 0, 0)
+        + payload
+    )
+
+
+def test_parsed_packet_answers_local_check_without_formatting():
+    """El paquete resuelve "¿es local?" con el entero, y el texto solo se calcula al pedirlo."""
+    # Entrante: la dirección remota es el ORIGEN (8.8.8.8), no el destino.
+    info = inspect(ipv4("8.8.8.8", "192.168.1.10", 6, tcp_bytes()), outbound=False)
+    assert info is not None
+    assert info.is_local_remote is False
+    assert info._remote_text is None, "no debe formatear la dirección si nadie la pide"
+    assert info.remote_addr == "8.8.8.8"
+    assert info._remote_text == "8.8.8.8"
+
+    # Y al revés: si el origen es de la LAN, la remota es local.
+    lan = inspect(ipv4("192.168.1.10", "8.8.8.8", 6, tcp_bytes()), outbound=False)
+    assert lan is not None and lan.is_local_remote is True
